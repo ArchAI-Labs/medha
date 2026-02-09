@@ -1,0 +1,32 @@
+[
+    {
+        "intent": "person_friends",
+        "template_text": "Find {name}'s friends",
+        "query_template": "MATCH (p:Person {name:'{name}'})-[:FRIEND]-(f) RETURN f.name",
+        "parameters": ["name"],
+        "priority": 1,
+        "parameter_patterns": {
+            "name": "\\b([A-Z][a-z]+(?:\\s[A-Z][a-z]+)?)\\b"
+        }
+    },
+    {
+        "intent": "company_employees",
+        "template_text": "Who works at {company}",
+        "query_template": "MATCH (p:Person)-[:WORKS_AT]->(c:Company {name:'{company}'}) RETURN p.name",
+        "parameters": ["company"],
+        "priority": 1,
+        "parameter_patterns": {
+            "company": "\\b([A-Z][a-zA-Z]+(?:\\s[A-Z][a-zA-Z]+)?)\\b"
+        }
+    },
+    {
+        "intent": "count_nodes",
+        "template_text": "How many {label} are in the database",
+        "query_template": "MATCH (n:{label}) RETURN COUNT(n)",
+        "parameters": ["label"],
+        "priority": 1,
+        "parameter_patterns": {
+            "label": "\\b(Person|Company|Project|Department)\\b"
+        }
+    }
+]

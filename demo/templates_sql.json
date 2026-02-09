@@ -1,0 +1,46 @@
+[
+    {
+        "intent": "count_entities",
+        "template_text": "How many {entity} are there",
+        "query_template": "SELECT COUNT(*) FROM {entity}",
+        "parameters": ["entity"],
+        "priority": 1,
+        "aliases": ["Count all {entity}", "Total number of {entity}"],
+        "parameter_patterns": {
+            "entity": "\\b(employees|products|orders|departments|users)\\b"
+        }
+    },
+    {
+        "intent": "top_n_entities",
+        "template_text": "Show top {count} {entity}",
+        "query_template": "SELECT * FROM {entity} LIMIT {count}",
+        "parameters": ["count", "entity"],
+        "priority": 1,
+        "aliases": ["List first {count} {entity}", "Get top {count} {entity}"],
+        "parameter_patterns": {
+            "count": "\\b(\\d+)\\b",
+            "entity": "\\b(employees|products|orders|departments|users)\\b"
+        }
+    },
+    {
+        "intent": "filter_by_department",
+        "template_text": "List employees in {department}",
+        "query_template": "SELECT * FROM employees WHERE department = '{department}'",
+        "parameters": ["department"],
+        "priority": 2,
+        "aliases": ["Show employees from {department}", "Who works in {department}"],
+        "parameter_patterns": {
+            "department": "\\b(Engineering|Marketing|Sales|HR|Finance)\\b"
+        }
+    },
+    {
+        "intent": "average_salary",
+        "template_text": "What is the average salary in {department}",
+        "query_template": "SELECT AVG(salary) FROM employees WHERE department = '{department}'",
+        "parameters": ["department"],
+        "priority": 2,
+        "parameter_patterns": {
+            "department": "\\b(Engineering|Marketing|Sales|HR|Finance)\\b"
+        }
+    }
+]

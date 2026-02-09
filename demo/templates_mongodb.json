@@ -1,0 +1,51 @@
+[
+    {
+        "intent": "find_by_field",
+        "template_text": "Find {collection} where {field} is {value}",
+        "query_template": "db.{collection}.find({\"{field}\": \"{value}\"})",
+        "parameters": ["collection", "field", "value"],
+        "priority": 1,
+        "aliases": ["Get {collection} with {field} equal to {value}", "Show {collection} where {field} = {value}"],
+        "parameter_patterns": {
+            "collection": "\\b(users|products|orders|employees|departments)\\b",
+            "field": "\\b(status|category|department|city|name)\\b",
+            "value": "\\b(active|pending|completed|Engineering|Marketing|Sales)\\b"
+        }
+    },
+    {
+        "intent": "count_collection",
+        "template_text": "Count all {collection}",
+        "query_template": "db.{collection}.countDocuments({})",
+        "parameters": ["collection"],
+        "priority": 1,
+        "aliases": ["How many {collection} are there", "Total number of {collection}"],
+        "parameter_patterns": {
+            "collection": "\\b(users|products|orders|employees|departments)\\b"
+        }
+    },
+    {
+        "intent": "top_n_sorted",
+        "template_text": "Show top {count} {collection} by {field}",
+        "query_template": "db.{collection}.find().sort({\"{field}\": -1}).limit({count})",
+        "parameters": ["count", "collection", "field"],
+        "priority": 1,
+        "aliases": ["Get first {count} {collection} ordered by {field}"],
+        "parameter_patterns": {
+            "count": "\\b(\\d+)\\b",
+            "collection": "\\b(users|products|orders|employees)\\b",
+            "field": "\\b(salary|price|date|name|age)\\b"
+        }
+    },
+    {
+        "intent": "average_by_group",
+        "template_text": "Average {field} by {group_field} in {collection}",
+        "query_template": "db.{collection}.aggregate([{\"$group\": {\"_id\": \"${group_field}\", \"avg\": {\"$avg\": \"${field}\"}}}])",
+        "parameters": ["field", "group_field", "collection"],
+        "priority": 2,
+        "parameter_patterns": {
+            "field": "\\b(salary|price|age|score)\\b",
+            "group_field": "\\b(department|category|city|status)\\b",
+            "collection": "\\b(users|products|orders|employees)\\b"
+        }
+    }
+]
