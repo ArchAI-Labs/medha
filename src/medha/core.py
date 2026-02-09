@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 import uuid
 from collections import OrderedDict
 from typing import Dict, List, Optional
@@ -284,54 +285,28 @@ class Medha:
         )
 
     async def _search_templates(self, question: str) -> Optional[CacheHit]:
-        """Search for template matches using vector similarity + parameter extraction.
+        """Search for template matches using parameter extraction + keyword scoring.
+
+        Iterates over all loaded templates and attempts parameter extraction.
+        Templates where all required parameters are successfully extracted are
+        scored using keyword overlap and parameter completeness.
 
         Steps:
-            1. Embed the normalized question.
-            2. Search the template collection.
-            3. For each candidate, extract parameters and compute a weighted score.
-            4. Return the best match if all parameters are extracted and score >= threshold.
-
-        Weighted score formula:
-            final = (vector_sim * 0.6) + (keyword_bonus * 0.2) + (param_completeness * 0.2)
-            final += (5 - priority) * 0.02  # Priority bonus
+            1. For each template, try to extract parameters from the question.
+            2. Skip templates where extraction fails or is incomplete.
+            3. Score candidates: keyword_overlap * 0.5 + param_completeness * 0.3
+               + priority_bonus.
+            4. Return the best match above the configured threshold.
         """
         if not self._templates:
             logger.debug("Template search skipped: no templates loaded")
             return None
 
-        embedding = await self._get_embedding(question)
-        if embedding is None:
-            return None
-
-        try:
-            results = await self._backend.search(
-                collection_name=self._template_collection,
-                vector=embedding,
-                limit=5,
-                score_threshold=self._settings.score_threshold_template,
-            )
-        except StorageError:
-            logger.warning("Template search failed for: '%s'", question[:50])
-            return None
-
-        if not results:
-            logger.debug("Template search returned 0 candidates")
-            return None
-        logger.debug("Template search returned %d candidates", len(results))
-
-        # Build a lookup: intent -> QueryTemplate
-        template_map = {t.intent: t for t in self._templates}
-
         best_hit: Optional[CacheHit] = None
         best_score = 0.0
         normalized = normalize_question(question)
 
-        for r in results:
-            template = template_map.get(r.template_id)
-            if template is None:
-                continue
-
+        for template in self._templates:
             # Try to extract parameters
             try:
                 params = self._param_extractor.extract(question, template)
@@ -351,19 +326,26 @@ class Medha:
                 )
                 continue
 
-            # Compute weighted score
+            # Compute score from keyword overlap + param completeness
             keyword_bonus = keyword_overlap_score(normalized, template.template_text)
-            vector_sim = r.score
             param_completeness = 1.0 if not template.parameters else (
                 len(params) / len(template.parameters)
             )
             final_score = (
-                (vector_sim * 0.6)
-                + (keyword_bonus * 0.2)
-                + (param_completeness * 0.2)
+                (keyword_bonus * 0.5)
+                + (param_completeness * 0.3)
             )
             # Priority bonus: priority 1 (highest) gets most bonus
             final_score += (5 - template.priority) * 0.02
+
+            logger.debug(
+                "Template '%s': keyword=%.2f, params=%d/%d, score=%.3f",
+                template.intent,
+                keyword_bonus,
+                len(params),
+                len(template.parameters) if template.parameters else 0,
+                final_score,
+            )
 
             if final_score > best_score:
                 best_score = final_score
@@ -640,7 +622,10 @@ class Medha:
             texts_to_embed = [template.template_text] + template.aliases
             for text in texts_to_embed:
                 try:
-                    vec = await self._embedder.aembed(normalize_question(text))
+                    # Strip {placeholder} braces so the embedder sees
+                    # natural words (e.g. "department") instead of noise.
+                    embed_text = re.sub(r"\{(\w+)\}", r"\1", text)
+                    vec = await self._embedder.aembed(normalize_question(embed_text))
                 except EmbeddingError:
                     logger.warning(
                         "Failed to embed template text: '%s'", text[:50]

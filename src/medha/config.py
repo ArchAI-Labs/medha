@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     # --- Search thresholds ---
     score_threshold_exact: float = Field(default=0.99, ge=0.0, le=1.0)
     score_threshold_semantic: float = Field(default=0.90, ge=0.0, le=1.0)
-    score_threshold_template: float = Field(default=0.85, ge=0.0, le=1.0)
+    score_threshold_template: float = Field(default=0.70, ge=0.0, le=1.0)
     score_threshold_fuzzy: float = Field(default=85.0, ge=0.0, le=100.0, description="Fuzzy match threshold (0-100)")
 
     # --- L1 Cache ---
