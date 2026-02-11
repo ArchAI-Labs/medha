@@ -93,7 +93,7 @@ pip install -e ".[dev,all]"
 ```python
 import asyncio
 from medha import Medha
-from medha.embeddings import FastEmbedAdapter
+from medha.embeddings.fastembed_adapter import FastEmbedAdapter
 
 async def main():
     embedder = FastEmbedAdapter()
@@ -137,7 +137,7 @@ The simplest setup, perfect for development, testing, and single-process applica
 ```python
 import asyncio
 from medha import Medha, Settings
-from medha.embeddings import FastEmbedAdapter
+from medha.embeddings.fastembed_adapter import FastEmbedAdapter
 
 async def main():
     settings = Settings(qdrant_mode="memory")  # default
@@ -167,7 +167,7 @@ docker run -p 6333:6333 qdrant/qdrant
 ```python
 import asyncio
 from medha import Medha, Settings
-from medha.embeddings import FastEmbedAdapter
+from medha.embeddings.fastembed_adapter import FastEmbedAdapter
 
 async def main():
     settings = Settings(
@@ -199,7 +199,7 @@ For production deployments using Qdrant Cloud with API key authentication.
 ```python
 import asyncio
 from medha import Medha, Settings
-from medha.embeddings import OpenAIAdapter
+from medha.embeddings.openai_adapter import OpenAIAdapter
 
 async def main():
     settings = Settings(
@@ -248,7 +248,7 @@ export MEDHA_TEMPLATE_FILE=/etc/medha/templates.json
 ```python
 import asyncio
 from medha import Medha, Settings
-from medha.embeddings import FastEmbedAdapter
+from medha.embeddings.fastembed_adapter import FastEmbedAdapter
 
 async def main():
     # Settings automatically loads from MEDHA_* environment variables
@@ -275,7 +275,7 @@ asyncio.run(main())
 Runs entirely locally using ONNX Runtime. No API key, no network calls, no costs.
 
 ```python
-from medha.embeddings import FastEmbedAdapter
+from medha.embeddings.fastembed_adapter import FastEmbedAdapter
 
 # Default model (384 dimensions, fast and lightweight)
 embedder = FastEmbedAdapter()
@@ -298,7 +298,7 @@ embedder = FastEmbedAdapter(
 Uses OpenAI's embedding API. Requires an API key (via parameter or `OPENAI_API_KEY` env var).
 
 ```python
-from medha.embeddings import OpenAIAdapter
+from medha.embeddings.openai_adapter import OpenAIAdapter
 
 # Default: text-embedding-3-small (1536 dimensions)
 embedder = OpenAIAdapter(api_key="sk-your-key")
@@ -407,7 +407,7 @@ Templates allow Medha to recognize parameterized patterns and generate queries d
 ```python
 import asyncio
 from medha import Medha, QueryTemplate
-from medha.embeddings import FastEmbedAdapter
+from medha.embeddings.fastembed_adapter import FastEmbedAdapter
 
 templates = [
     QueryTemplate(
@@ -489,7 +489,7 @@ asyncio.run(main())
 
 ```python
 from medha import Medha, Settings
-from medha.embeddings import FastEmbedAdapter
+from medha.embeddings.fastembed_adapter import FastEmbedAdapter
 
 settings = Settings(template_file="templates.json")
 
@@ -522,7 +522,7 @@ Efficiently store many question-query pairs at once.
 ```python
 import asyncio
 from medha import Medha
-from medha.embeddings import FastEmbedAdapter
+from medha.embeddings.fastembed_adapter import FastEmbedAdapter
 
 entries = [
     {
@@ -570,7 +570,7 @@ Medha provides sync wrappers for environments where `asyncio` is not available (
 
 ```python
 from medha import Medha
-from medha.embeddings import FastEmbedAdapter
+from medha.embeddings.fastembed_adapter import FastEmbedAdapter
 
 # Initialize
 embedder = FastEmbedAdapter()
@@ -599,7 +599,7 @@ Medha is query-language agnostic. Here are examples for different query language
 
 ```python
 from medha import Medha, Settings
-from medha.embeddings import FastEmbedAdapter
+from medha.embeddings.fastembed_adapter import FastEmbedAdapter
 
 settings = Settings(query_language="sql")
 
@@ -734,7 +734,7 @@ Track cache performance and hit rates at runtime.
 ```python
 import asyncio
 from medha import Medha
-from medha.embeddings import FastEmbedAdapter
+from medha.embeddings.fastembed_adapter import FastEmbedAdapter
 
 async def main():
     embedder = FastEmbedAdapter()
@@ -803,7 +803,7 @@ A complete configuration combining all features for a production Text-to-SQL sys
 ```python
 import asyncio
 from medha import Medha, Settings, QueryTemplate, setup_logging
-from medha.embeddings import OpenAIAdapter
+from medha.embeddings.openai_adapter import OpenAIAdapter
 
 # Configure logging
 setup_logging(level="INFO", log_file="medha.log")
