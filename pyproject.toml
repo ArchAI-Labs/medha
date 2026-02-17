@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "medha"
+name = "medha-archai"
 version = "0.1.0"
 description = "Semantic Memory for AI Text-to-Query systems"
 readme = "README.md"
@@ -43,7 +43,7 @@ nlp = ["spacy>=3.7,<4"]
 fuzzy = ["rapidfuzz>=3.0,<4"]
 
 # All optional providers
-all = ["medha[fastembed,openai,nlp,fuzzy]"]
+all = ["medha-archai[fastembed,openai,nlp,fuzzy]"]
 
 # Development
 dev = [

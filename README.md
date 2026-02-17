@@ -1,6 +1,6 @@
 # Medha
 
-![medha_logo](https://github.com/nickprock/medha/blob/develop/img/medha_logo.png)
+![medha_logo](https://github.com/ArchAI-Labs/medha/blob/main/img/medha_logo.png)
 
 ## Semantic Memory for AI Data Agents
 
@@ -50,7 +50,7 @@ Medha uses a sophisticated multi-tier search strategy to maximize cache hits. If
 ### Core (minimal)
 
 ```bash
-pip install git+https://github.com/ArchAI-Labs/medha.git
+pip install medha-archai
 ```
 
 Core dependencies: `pydantic`, `pydantic-settings`, `qdrant-client`.
@@ -59,28 +59,32 @@ Core dependencies: `pydantic`, `pydantic-settings`, `qdrant-client`.
 
 ```bash
 # Local embeddings with FastEmbed (recommended for getting started)
-pip install "medha[fastembed] @ git+https://github.com/ArchAI-Labs/medha.git"
+pip install "medha-archai[fastembed]"
 
 # OpenAI embeddings
-pip install "medha[openai] @ git+https://github.com/ArchAI-Labs/medha.git"
+pip install "medha-archai[openai]"
 ```
 
 ### With optional extras
 
 ```bash
 # Fuzzy matching (Tier 4 - Levenshtein distance)
-pip install "medha[fuzzy] @ git+https://github.com/ArchAI-Labs/medha.git"
+pip install "medha-archai[fuzzy]"
 
 # spaCy NLP for advanced parameter extraction
-pip install "medha[nlp] @ git+https://github.com/ArchAI-Labs/medha.git"
+pip install "medha-archai[nlp]"
 
 # Everything
-pip install "medha[all] @ git+https://github.com/ArchAI-Labs/medha.git"
+pip install "medha-archai[all]"
 ```
 
-### Development install
+### Install from source
 
 ```bash
+# From GitHub
+pip install git+https://github.com/ArchAI-Labs/medha.git
+
+# Development install
 git clone https://github.com/ArchAI-Labs/medha.git
 cd medha
 pip install -e ".[dev,all]"
@@ -93,7 +97,7 @@ pip install -e ".[dev,all]"
 ```python
 import asyncio
 from medha import Medha
-from medha.embeddings import FastEmbedAdapter
+from medha.embeddings.fastembed_adapter import FastEmbedAdapter
 
 async def main():
     embedder = FastEmbedAdapter()
@@ -137,7 +141,7 @@ The simplest setup, perfect for development, testing, and single-process applica
 ```python
 import asyncio
 from medha import Medha, Settings
-from medha.embeddings import FastEmbedAdapter
+from medha.embeddings.fastembed_adapter import FastEmbedAdapter
 
 async def main():
     settings = Settings(qdrant_mode="memory")  # default
@@ -167,7 +171,7 @@ docker run -p 6333:6333 qdrant/qdrant
 ```python
 import asyncio
 from medha import Medha, Settings
-from medha.embeddings import FastEmbedAdapter
+from medha.embeddings.fastembed_adapter import FastEmbedAdapter
 
 async def main():
     settings = Settings(
@@ -199,7 +203,7 @@ For production deployments using Qdrant Cloud with API key authentication.
 ```python
 import asyncio
 from medha import Medha, Settings
-from medha.embeddings import OpenAIAdapter
+from medha.embeddings.openai_adapter import OpenAIAdapter
 
 async def main():
     settings = Settings(
@@ -248,7 +252,7 @@ export MEDHA_TEMPLATE_FILE=/etc/medha/templates.json
 ```python
 import asyncio
 from medha import Medha, Settings
-from medha.embeddings import FastEmbedAdapter
+from medha.embeddings.fastembed_adapter import FastEmbedAdapter
 
 async def main():
     # Settings automatically loads from MEDHA_* environment variables
@@ -275,7 +279,7 @@ asyncio.run(main())
 Runs entirely locally using ONNX Runtime. No API key, no network calls, no costs.
 
 ```python
-from medha.embeddings import FastEmbedAdapter
+from medha.embeddings.fastembed_adapter import FastEmbedAdapter
 
 # Default model (384 dimensions, fast and lightweight)
 embedder = FastEmbedAdapter()
@@ -298,7 +302,7 @@ embedder = FastEmbedAdapter(
 Uses OpenAI's embedding API. Requires an API key (via parameter or `OPENAI_API_KEY` env var).
 
 ```python
-from medha.embeddings import OpenAIAdapter
+from medha.embeddings.openai_adapter import OpenAIAdapter
 
 # Default: text-embedding-3-small (1536 dimensions)
 embedder = OpenAIAdapter(api_key="sk-your-key")
@@ -393,7 +397,7 @@ from medha import Settings
 settings = Settings(l1_cache_max_size=0)
 
 # Fuzzy matching is automatically disabled if rapidfuzz is not installed
-# To install: pip install "medha[fuzzy]"
+# To install: pip install "medha-archai[fuzzy]"
 ```
 
 ---
@@ -407,7 +411,7 @@ Templates allow Medha to recognize parameterized patterns and generate queries d
 ```python
 import asyncio
 from medha import Medha, QueryTemplate
-from medha.embeddings import FastEmbedAdapter
+from medha.embeddings.fastembed_adapter import FastEmbedAdapter
 
 templates = [
     QueryTemplate(
@@ -489,7 +493,7 @@ asyncio.run(main())
 
 ```python
 from medha import Medha, Settings
-from medha.embeddings import FastEmbedAdapter
+from medha.embeddings.fastembed_adapter import FastEmbedAdapter
 
 settings = Settings(template_file="templates.json")
 
@@ -522,7 +526,7 @@ Efficiently store many question-query pairs at once.
 ```python
 import asyncio
 from medha import Medha
-from medha.embeddings import FastEmbedAdapter
+from medha.embeddings.fastembed_adapter import FastEmbedAdapter
 
 entries = [
     {
@@ -570,7 +574,7 @@ Medha provides sync wrappers for environments where `asyncio` is not available (
 
 ```python
 from medha import Medha
-from medha.embeddings import FastEmbedAdapter
+from medha.embeddings.fastembed_adapter import FastEmbedAdapter
 
 # Initialize
 embedder = FastEmbedAdapter()
@@ -599,7 +603,7 @@ Medha is query-language agnostic. Here are examples for different query language
 
 ```python
 from medha import Medha, Settings
-from medha.embeddings import FastEmbedAdapter
+from medha.embeddings.fastembed_adapter import FastEmbedAdapter
 
 settings = Settings(query_language="sql")
 
@@ -734,7 +738,7 @@ Track cache performance and hit rates at runtime.
 ```python
 import asyncio
 from medha import Medha
-from medha.embeddings import FastEmbedAdapter
+from medha.embeddings.fastembed_adapter import FastEmbedAdapter
 
 async def main():
     embedder = FastEmbedAdapter()
@@ -803,7 +807,7 @@ A complete configuration combining all features for a production Text-to-SQL sys
 ```python
 import asyncio
 from medha import Medha, Settings, QueryTemplate, setup_logging
-from medha.embeddings import OpenAIAdapter
+from medha.embeddings.openai_adapter import OpenAIAdapter
 
 # Configure logging
 setup_logging(level="INFO", log_file="medha.log")
