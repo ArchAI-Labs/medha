@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "medha"
+name = "medha-archai"
 version = "0.1.0"
 description = "Semantic Memory for AI Text-to-Query systems"
 readme = "README.md"
