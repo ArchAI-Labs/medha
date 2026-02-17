@@ -1,6 +1,6 @@
 # Medha
 
-![medha_logo](https://github.com/nickprock/medha/blob/develop/img/medha_logo.png)
+![medha_logo](https://github.com/ArchAI-Labs/medha/blob/main/img/medha_logo.png)
 
 ## Semantic Memory for AI Data Agents
 
@@ -50,7 +50,7 @@ Medha uses a sophisticated multi-tier search strategy to maximize cache hits. If
 ### Core (minimal)
 
 ```bash
-pip install git+https://github.com/ArchAI-Labs/medha.git
+pip install medha
 ```
 
 Core dependencies: `pydantic`, `pydantic-settings`, `qdrant-client`.
@@ -59,28 +59,32 @@ Core dependencies: `pydantic`, `pydantic-settings`, `qdrant-client`.
 
 ```bash
 # Local embeddings with FastEmbed (recommended for getting started)
-pip install "medha[fastembed] @ git+https://github.com/ArchAI-Labs/medha.git"
+pip install "medha[fastembed]"
 
 # OpenAI embeddings
-pip install "medha[openai] @ git+https://github.com/ArchAI-Labs/medha.git"
+pip install "medha[openai]"
 ```
 
 ### With optional extras
 
 ```bash
 # Fuzzy matching (Tier 4 - Levenshtein distance)
-pip install "medha[fuzzy] @ git+https://github.com/ArchAI-Labs/medha.git"
+pip install "medha[fuzzy]"
 
 # spaCy NLP for advanced parameter extraction
-pip install "medha[nlp] @ git+https://github.com/ArchAI-Labs/medha.git"
+pip install "medha[nlp]"
 
 # Everything
-pip install "medha[all] @ git+https://github.com/ArchAI-Labs/medha.git"
+pip install "medha[all]"
 ```
 
-### Development install
+### Install from source
 
 ```bash
+# From GitHub
+pip install git+https://github.com/ArchAI-Labs/medha.git
+
+# Development install
 git clone https://github.com/ArchAI-Labs/medha.git
 cd medha
 pip install -e ".[dev,all]"
