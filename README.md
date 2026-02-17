@@ -50,7 +50,7 @@ Medha uses a sophisticated multi-tier search strategy to maximize cache hits. If
 ### Core (minimal)
 
 ```bash
-pip install medha
+pip install medha-archai
 ```
 
 Core dependencies: `pydantic`, `pydantic-settings`, `qdrant-client`.
@@ -59,23 +59,23 @@ Core dependencies: `pydantic`, `pydantic-settings`, `qdrant-client`.
 
 ```bash
 # Local embeddings with FastEmbed (recommended for getting started)
-pip install "medha[fastembed]"
+pip install "medha-archai[fastembed]"
 
 # OpenAI embeddings
-pip install "medha[openai]"
+pip install "medha-archai[openai]"
 ```
 
 ### With optional extras
 
 ```bash
 # Fuzzy matching (Tier 4 - Levenshtein distance)
-pip install "medha[fuzzy]"
+pip install "medha-archai[fuzzy]"
 
 # spaCy NLP for advanced parameter extraction
-pip install "medha[nlp]"
+pip install "medha-archai[nlp]"
 
 # Everything
-pip install "medha[all]"
+pip install "medha-archai[all]"
 ```
 
 ### Install from source
@@ -397,7 +397,7 @@ from medha import Settings
 settings = Settings(l1_cache_max_size=0)
 
 # Fuzzy matching is automatically disabled if rapidfuzz is not installed
-# To install: pip install "medha[fuzzy]"
+# To install: pip install "medha-archai[fuzzy]"
 ```
 
 ---
