@@ -1,6 +1,6 @@
 # Medha
 
-[![PyPI Downloads](https://static.pepy.tech/personalized-badge/medha-archai?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/medha-archai)
+[![PyPI Downloads](https://static.pepy.tech/personalized-badge/medha-archai?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=BLUE&left_text=downloads)](https://pepy.tech/projects/medha-archai)
 
 <br>
 
