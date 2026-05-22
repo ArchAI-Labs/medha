@@ -97,6 +97,8 @@ nav:
       - TTL & Lifecycle: user_guide/ttl_and_lifecycle.md
       - Invalidation: user_guide/invalidation.md
       - Batch Operations: user_guide/batch_operations.md
+      - Feedback Loop: user_guide/feedback.md
+      - CLI: user_guide/cli.md
       - Observability: user_guide/observability.md
       - Framework Integrations: user_guide/framework_integrations.md
   - API Reference:

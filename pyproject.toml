@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "medha-archai"
-version = "0.3.1"
+version = "0.4.0"
 description = "Semantic Memory for AI Text-to-Query systems"
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -47,6 +47,9 @@ fuzzy = ["rapidfuzz>=3.0,<4"]
 # Redis Stack (RediSearch) vector backend + L1 cache
 redis = ["redis[hiredis]>=4.6,<6"]
 
+# CLI
+cli = ["typer>=0.12,<1", "rich>=13,<14"]
+
 # All optional providers
 qdrant = ["qdrant-client>=1.9,<2"]
 pgvector = [
@@ -60,8 +63,8 @@ weaviate = ["weaviate-client>=4.6,<5"]
 azure-search = ["azure-search-documents>=11.4,<12"]
 lancedb = ["lancedb>=0.6,<1", "pyarrow>=13"]
 
-all = ["medha-archai[fastembed,openai,cohere,gemini,nlp,gliner,fuzzy,redis,qdrant,pgvector,elasticsearch,vectorchord,chroma,weaviate,azure-search,lancedb]"]
-all-no-chroma = ["medha-archai[fastembed,openai,cohere,gemini,nlp,gliner,fuzzy,redis,qdrant,pgvector,elasticsearch,vectorchord,weaviate,azure-search,lancedb]"]
+all = ["medha-archai[fastembed,openai,cohere,gemini,nlp,gliner,fuzzy,redis,qdrant,pgvector,elasticsearch,vectorchord,chroma,weaviate,azure-search,lancedb,cli]"]
+all-no-chroma = ["medha-archai[fastembed,openai,cohere,gemini,nlp,gliner,fuzzy,redis,qdrant,pgvector,elasticsearch,vectorchord,weaviate,azure-search,lancedb,cli]"]
 
 # Documentation
 docs = [
@@ -81,6 +84,9 @@ dev = [
     "mypy>=1.10",
     "pre-commit>=3.0",
 ]
+
+[project.scripts]
+medha = "medha.cli:app"
 
 [project.urls]
 Homepage    = "https://github.com/ArchAI-Labs/medha"
@@ -106,6 +112,7 @@ markers = [
     "weaviate: tests that require a running Weaviate instance",
     "azure_search: tests that require an Azure AI Search service",
     "lancedb: tests that require the lancedb package",
+    "cli: tests that require the medha[cli] extra (typer, rich)",
 ]
 
 [tool.ruff]

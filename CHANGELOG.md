@@ -5,7 +5,53 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.3.1] — 2026-04-22
+## [0.4.0] — 2026-05-19
+
+### Breaking Changes
+
+- **Custom `VectorStorageBackend` subclasses** must implement
+  `update_feedback(collection_name, point_id, correct) -> int` or raise
+  `TypeError` at instantiation.
+
+### Added
+
+- `Medha.feedback(question, correct)` — record a correct/incorrect signal for a
+  cached question. Returns `True` if found and updated, `False` if not found.
+- `Settings.feedback_incorrect_threshold` (`int | None`, default `None`,
+  env `MEDHA_FEEDBACK_INCORRECT_THRESHOLD`) — when set, entries are
+  automatically invalidated once `feedback_incorrect` reaches the threshold.
+- `CacheEntry.feedback_correct` / `CacheEntry.feedback_incorrect` — new fields,
+  default 0, backward compatible with 0.3.x entries.
+- `CacheResult.feedback_correct` / `CacheResult.feedback_incorrect` — counters
+  visible in backend search results.
+- `VectorStorageBackend.update_feedback(collection, point_id, correct) -> int`
+  — new abstract method returning the new counter value; implemented by all ten
+  built-in backends.
+- `medha` CLI — install with `pip install "medha-archai[cli]"`.
+  Commands: `stats`, `warm`, `invalidate`, `invalidate-collection`, `expire`,
+  `dedup`, `export`, `feedback`.
+- `Settings.embedder_type` — declarative embedder selection via
+  `MEDHA_EMBEDDER_TYPE` env var. Accepted values: `fastembed`, `openai`,
+  `cohere`, `gemini`, `_noop` (default). Used by the CLI factory; no change to
+  the `Medha(embedder=...)` call signature.
+- `Settings.collection` — default collection name for CLI commands via
+  `MEDHA_COLLECTION` env var (default: `"default"`).
+- `Settings.fastembed_model` — FastEmbed model name via `MEDHA_FASTEMBED_MODEL`
+  env var (default: `"BAAI/bge-small-en-v1.5"`).
+- `_NoOpEmbedder` (private, `medha.cli._noop_embedder`) — placeholder embedder
+  used by CLI admin commands that do not perform vector search or storage.
+  `medha feedback` works with `_NoOpEmbedder` because it uses a plain text
+  lookup, not vector search.
+
+### Notes
+
+- `medha stats` reports structural information only (entry count). In-process
+  performance metrics (hit rate, latency percentiles) are not available from the
+  CLI because `CacheStats` is a non-persistent in-memory accumulator.
+
+---
+
+## [0.3.0] — 2026-04-22
 
 ### Breaking Changes
 

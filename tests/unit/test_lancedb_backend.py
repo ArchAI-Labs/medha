@@ -168,8 +168,11 @@ async def test_initialize_opens_existing_table(lancedb_backend, mock_lancedb_db)
 
     await b.initialize(COLL, DIM)
 
-    mock_lancedb_db.open_table.assert_called_once_with(table_name)
-    mock_lancedb_db.create_table.assert_not_called()
+    # Backend uses create_table(exist_ok=True) for both new and existing tables
+    mock_lancedb_db.create_table.assert_called_once()
+    call_kwargs = mock_lancedb_db.create_table.call_args.kwargs
+    assert call_kwargs.get("exist_ok") is True
+    mock_lancedb_db.open_table.assert_not_called()
 
 
 async def test_initialize_idempotent(lancedb_backend, mock_lancedb_db):

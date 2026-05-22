@@ -52,6 +52,9 @@ class _SimpleBackend(VectorStorageBackend):
     async def drop_collection(self, collection_name):
         self._collections.pop(collection_name, None)
 
+    async def update_feedback(self, collection_name: str, point_id: str, correct: bool) -> int:
+        return 0
+
     async def close(self):
         pass
 

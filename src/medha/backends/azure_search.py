@@ -360,6 +360,26 @@ class AzureSearchBackend(VectorStorageBackend):
                 f"Azure Search update_usage_count merge failed on '{collection_name}': {e}"
             ) from e
 
+    async def update_feedback(self, collection_name: str, point_id: str, correct: bool) -> int:
+        client = self._get_client(collection_name)
+        try:
+            result = await client.get_document(key=point_id)
+        except ResourceNotFoundError:
+            return 0
+        except HttpResponseError as e:
+            raise StorageError(
+                f"Azure Search update_feedback failed on '{collection_name}': {e}"
+            ) from e
+        field = "feedback_correct" if correct else "feedback_incorrect"
+        new_val = int(result.get(field, 0)) + 1
+        try:
+            await client.merge_or_upload_documents([{"id": point_id, field: new_val}])
+        except HttpResponseError as e:
+            raise StorageError(
+                f"Azure Search update_feedback merge failed on '{collection_name}': {e}"
+            ) from e
+        return new_val
+
     async def find_expired(self, collection_name: str) -> list[str]:
         client = self._get_client(collection_name)
         now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

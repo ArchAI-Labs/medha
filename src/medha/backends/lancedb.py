@@ -148,6 +148,33 @@ class LanceDBBackend(VectorStorageBackend):
         self._dimensions.clear()
         self._db = None
 
+    async def update_feedback(self, collection_name: str, point_id: str, correct: bool) -> int:
+        table = self._get_table(collection_name)
+        safe_id = point_id.replace("'", "''")
+        try:
+            rows: list[dict[str, Any]] = await (
+                table.query()
+                .where(f"id = '{safe_id}'")
+                .limit(1)
+                .to_list()
+            )
+        except Exception as e:
+            raise StorageError(
+                f"LanceDB update_feedback failed on '{collection_name}': {e}"
+            ) from e
+        if not rows:
+            return 0
+        field = "feedback_correct" if correct else "feedback_incorrect"
+        current = int(rows[0].get(field, 0)) if field in rows[0] else 0
+        new_val = current + 1
+        try:
+            await table.update(where=f"id = '{safe_id}'", values={field: new_val})
+        except Exception as e:
+            raise StorageError(
+                f"LanceDB update_feedback update failed on '{collection_name}': {e}"
+            ) from e
+        return new_val
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------

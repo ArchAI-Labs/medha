@@ -106,6 +106,8 @@ class InMemoryBackend(VectorStorageBackend):
                         "usage_count": entry.usage_count,
                         "created_at": entry.created_at.isoformat(),
                         "expires_at": entry.expires_at.isoformat() if entry.expires_at else None,
+                        "feedback_correct": entry.feedback_correct,
+                        "feedback_incorrect": entry.feedback_incorrect,
                     },
                 }
 
@@ -216,6 +218,27 @@ class InMemoryBackend(VectorStorageBackend):
                 return
             entries[point_id]["payload"]["usage_count"] += 1
 
+    async def update_feedback(
+        self, collection_name: str, point_id: str, correct: bool
+    ) -> int:
+        async with self._lock:
+            entries = self._store.get(collection_name, {}).get("entries", {})
+            if point_id not in entries:
+                logger.warning(
+                    "update_feedback: id '%s' not found in collection '%s'",
+                    point_id,
+                    collection_name,
+                )
+                return 0
+            payload = entries[point_id]["payload"]
+            if correct:
+                new_value = payload.get("feedback_correct", 0) + 1
+                payload["feedback_correct"] = new_value
+            else:
+                new_value = payload.get("feedback_incorrect", 0) + 1
+                payload["feedback_incorrect"] = new_value
+            return new_value
+
 
 def _parse_dt(value: str) -> datetime | None:
     with contextlib.suppress(ValueError, TypeError):
@@ -240,4 +263,6 @@ def _point_to_cache_result(point: dict[str, Any], score: float) -> CacheResult:
         usage_count=payload.get("usage_count", 0),
         created_at=_parse_dt(payload["created_at"]) if payload.get("created_at") else None,
         expires_at=_parse_dt(payload["expires_at"]) if payload.get("expires_at") else None,
+        feedback_correct=payload.get("feedback_correct", 0),
+        feedback_incorrect=payload.get("feedback_incorrect", 0),
     )

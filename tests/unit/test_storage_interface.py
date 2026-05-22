@@ -196,3 +196,45 @@ class TestBackendContract:
 
         assert result is not None
         assert result.generated_query == "SELECT norm"
+
+    async def test_update_feedback_correct_returns_one(self, any_backend, make_entry_fixture):
+        entry = make_entry_fixture(question="fb correct contract", query="SELECT fb_c")
+        await any_backend.initialize("contract_test", 8)
+        await any_backend.upsert("contract_test", [entry])
+
+        result = await any_backend.update_feedback("contract_test", entry.id, correct=True)
+
+        assert result == 1
+
+    async def test_update_feedback_incorrect_returns_one(self, any_backend, make_entry_fixture):
+        entry = make_entry_fixture(question="fb incorrect contract", query="SELECT fb_i")
+        await any_backend.initialize("contract_test", 8)
+        await any_backend.upsert("contract_test", [entry])
+
+        result = await any_backend.update_feedback("contract_test", entry.id, correct=False)
+
+        assert result == 1
+
+    async def test_update_feedback_accumulates(self, any_backend, make_entry_fixture):
+        entry = make_entry_fixture(question="fb accum contract", query="SELECT fb_accum")
+        await any_backend.initialize("contract_test", 8)
+        await any_backend.upsert("contract_test", [entry])
+
+        await any_backend.update_feedback("contract_test", entry.id, correct=True)
+        await any_backend.update_feedback("contract_test", entry.id, correct=True)
+        await any_backend.update_feedback("contract_test", entry.id, correct=False)
+
+        results, _ = await any_backend.scroll("contract_test")
+        matching = [r for r in results if r.id == entry.id]
+        assert matching
+        assert matching[0].feedback_correct == 2
+        assert matching[0].feedback_incorrect == 1
+
+    async def test_update_feedback_missing_id_returns_zero(self, any_backend, make_entry_fixture):
+        await any_backend.initialize("contract_test", 8)
+
+        result = await any_backend.update_feedback(
+            "contract_test", "no-such-id-000", correct=True
+        )
+
+        assert result == 0

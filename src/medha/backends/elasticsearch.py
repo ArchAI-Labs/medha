@@ -285,6 +285,38 @@ class ElasticsearchBackend(VectorStorageBackend):
         except TransportError as e:
             raise StorageError(f"Elasticsearch update_usage_count failed on '{collection_name}': {e}") from e
 
+    async def update_feedback(self, collection_name: str, point_id: str, correct: bool) -> int:
+        if self._client is None:
+            raise StorageError("Not connected. Call connect() first.")
+        index_name = self._index_name(collection_name)
+        field = "feedback_correct" if correct else "feedback_incorrect"
+        script = {
+            "source": (
+                "if (ctx._source.containsKey(params.field)) "
+                "{ ctx._source[params.field]++; } "
+                "else { ctx._source[params.field] = 1; }"
+            ),
+            "params": {"field": field},
+        }
+        try:
+            resp = await self._client.update(
+                index=index_name,
+                id=point_id,
+                body={"script": script},
+                ignore=[404],
+            )
+        except TransportError as e:
+            raise StorageError(f"Elasticsearch update_feedback failed on '{collection_name}': {e}") from e
+
+        if resp.get("result") == "not_found" or resp.get("_shards", {}).get("successful", 1) == 0:
+            return 0
+
+        try:
+            get_resp = await self._client.get(index=index_name, id=point_id, _source_includes=[field])
+            return int(get_resp["_source"].get(field, 0))
+        except NotFoundError:
+            return 0
+
     async def find_expired(self, collection_name: str) -> list[str]:
         if self._client is None:
             raise StorageError("Not connected. Call connect() first.")

@@ -109,6 +109,9 @@ pip install "medha-archai[azure-search]"
 
 # LanceDB (embedded / S3 / GCS / Azure Blob)
 pip install "medha-archai[lancedb]"
+
+# CLI management tool
+pip install "medha-archai[cli]"
 ```
 
 ### With optional extras
@@ -1579,6 +1582,8 @@ asyncio.run(main())
 | `Medha.load_templates(templates)` | Load `QueryTemplate` list at runtime |
 | `Medha.load_templates_from_file(path)` | Load templates from JSON file |
 | `Medha.clear_caches()` | Clear L1 + embedding caches (async) |
+| `Medha.feedback(question, correct)` | Record correct/incorrect signal for a cached entry |
+| `Medha.feedback_sync` | Sync wrapper for `feedback()` |
 | `Medha.search_sync` / `store_sync` / `warm_from_file_sync` / `clear_caches_sync` | Sync wrappers |
 
 ### Configuration & Types
@@ -1586,6 +1591,7 @@ asyncio.run(main())
 | Class | Description |
 |---|---|
 | `Settings` | Pydantic configuration with env var support (`MEDHA_` prefix) |
+| `Settings.feedback_incorrect_threshold` | Auto-invalidate a cache entry when its incorrect-feedback count reaches N |
 | `CacheHit` | Search result: `generated_query`, `confidence`, `strategy`, `expires_at` |
 | `CacheStats` | Immutable stats snapshot: hit/miss rates, latency percentiles, per-strategy breakdown |
 | `StrategyStats` | Per-strategy `count`, `total_latency_ms`, `avg_latency_ms` |
@@ -1593,6 +1599,8 @@ asyncio.run(main())
 | `CacheEntry` | Stored cache entry with vector and metadata |
 | `CacheResult` | Backend search result with score |
 | `SearchStrategy` | Enum: `l1_cache`, `template_match`, `exact_match`, `semantic_match`, `fuzzy_match`, `no_match`, `error` |
+
+> **Breaking change in 0.4.0:** Custom `VectorStorageBackend` subclasses must implement `update_feedback(entry_id, correct)`. Add a no-op implementation to avoid `TypeError` on instantiation.
 
 ### Interfaces & Backends
 
@@ -1645,7 +1653,10 @@ asyncio.run(main())
 * [x] `CacheStats` observability model with hit rate, latency percentiles, and per-strategy breakdown.
 * [x] `store_many()`, `export_to_dataframe()`, `dedup_collection()` — batch and management operations.
 * [x] `qdrant-client` moved to optional `[qdrant]` extra; default `backend_type` changed to `"memory"`.
-* [ ] Feedback loop — mark a cache hit as correct/incorrect.
+* [x] Feedback loop — `Medha.feedback()` with optional auto-invalidation
+      (`feedback_incorrect_threshold`).
+* [x] `medha` CLI — `pip install "medha-archai[cli]"`. Commands: stats,
+      warm, invalidate, invalidate-collection, expire, dedup, export, feedback.
 
 ---
 

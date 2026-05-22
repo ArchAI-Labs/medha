@@ -39,6 +39,14 @@ Choose the extras that match your use case:
 
     Production-grade setup: Qdrant vector store + local ONNX embeddings.
 
+=== "CLI"
+
+    ```bash
+    pip install "medha-archai[cli,fastembed]"
+    ```
+
+    Installs the `medha` command-line tool plus FastEmbed. Run `medha --help` to see all commands. See the [CLI guide](user_guide/cli.md) for details.
+
 === "Everything"
 
     ```bash

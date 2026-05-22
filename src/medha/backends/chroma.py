@@ -272,6 +272,24 @@ class ChromaBackend(VectorStorageBackend):
                 f"Chroma update_usage_count failed on '{collection_name}': {e}"
             ) from e
 
+    async def update_feedback(self, collection_name: str, id_: str, correct: bool) -> int:
+        collection = self._get_collection(collection_name)
+        try:
+            result = await self._run(collection.get, ids=[id_], include=["metadatas"])
+            if not result["ids"]:
+                return 0
+            metadata = result["metadatas"][0] or {}
+            field = "feedback_correct" if correct else "feedback_incorrect"
+            new_val = int(metadata.get(field, 0)) + 1
+            await self._run(collection.update, ids=[id_], metadatas=[{**metadata, field: new_val}])
+            return new_val
+        except StorageError:
+            raise
+        except Exception as e:
+            raise StorageError(
+                f"Chroma update_feedback failed on '{collection_name}': {e}"
+            ) from e
+
     async def find_expired(self, collection_name: str) -> list[str]:
         collection = self._get_collection(collection_name)
         now_iso = _now_iso()

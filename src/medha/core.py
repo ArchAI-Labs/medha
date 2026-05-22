@@ -1023,6 +1023,46 @@ class Medha:
         logger.info("Invalidated collection '%s' (%d entries dropped)", coll, count)
         return count
 
+    async def feedback(self, question: str, correct: bool) -> bool:
+        """Record feedback for a previously cached question.
+
+        Locates the entry by exact normalized-question match, increments
+        feedback_correct or feedback_incorrect, and — if
+        Settings.feedback_incorrect_threshold is set and the incorrect count
+        has reached it — automatically invalidates the entry.
+
+        Args:
+            question: The original natural-language question.
+            correct:  True → the cached query was correct; False → it was wrong.
+
+        Returns:
+            True  if the entry was found and updated.
+            False if no entry exists for the question (expired, invalidated, or
+                  never stored).
+        """
+        normalized = normalize_question(question)
+        result = await self._backend.search_by_normalized_question(
+            self._collection_name, normalized
+        )
+        if result is None:
+            logger.warning("feedback: no entry found for '%s'", question[:50])
+            return False
+        new_count = await self._backend.update_feedback(
+            self._collection_name, result.id, correct
+        )
+        if (
+            not correct
+            and self._settings.feedback_incorrect_threshold is not None
+            and new_count >= self._settings.feedback_incorrect_threshold
+        ):
+            await self.invalidate(question)
+            logger.info(
+                "Auto-invalidated '%s' after %d incorrect feedbacks",
+                question[:50],
+                new_count,
+            )
+        return True
+
     async def _cleanup_loop(self) -> None:
         interval = self._settings.cleanup_interval_seconds
         while True:
@@ -1672,3 +1712,7 @@ class Medha:
     def clear_caches_sync(self) -> None:
         """Synchronous wrapper for clear_caches()."""
         BaseEmbedder._run_sync(self.clear_caches())
+
+    def feedback_sync(self, question: str, correct: bool) -> bool:
+        """Synchronous wrapper for feedback()."""
+        return BaseEmbedder._run_sync(self.feedback(question, correct))

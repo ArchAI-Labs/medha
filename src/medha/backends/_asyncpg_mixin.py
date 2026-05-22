@@ -153,6 +153,38 @@ class _AsyncpgBackendMixin:
                 collection_name,
             )
 
+    async def update_feedback(self, collection_name: str, point_id: str, correct: bool) -> int:
+        if self._pool is None:
+            raise StorageError("Not connected. Call connect() first.")
+
+        import logging
+        logger = logging.getLogger(__name__)
+
+        schema = self._settings.pg_schema
+        table = self._table_name(collection_name)
+        col = "feedback_correct" if correct else "feedback_incorrect"
+
+        try:
+            async with self._pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    f"UPDATE {schema}.{table}"
+                    f" SET {col} = COALESCE({col}, 0) + 1"
+                    f" WHERE id = $1::uuid"
+                    f" RETURNING {col}",
+                    uuid.UUID(point_id),
+                )
+        except Exception as e:
+            raise StorageError(f"asyncpg operation failed on '{collection_name}': {e}") from e
+
+        if row is None:
+            logger.warning(
+                "update_feedback: id '%s' not found in collection '%s'",
+                point_id,
+                collection_name,
+            )
+            return 0
+        return int(row[col])
+
     async def close(self) -> None:
         if self._pool is not None:
             await self._pool.close()

@@ -140,6 +140,19 @@ class MockBackend(VectorStorageBackend):
     async def drop_collection(self, collection_name: str) -> None:
         self._collections.pop(collection_name, None)
 
+    async def update_feedback(
+        self, collection_name: str, point_id: str, correct: bool
+    ) -> int:
+        for e in self._collections.get(collection_name, []):
+            if e.id == point_id:
+                if correct:
+                    e.feedback_correct += 1
+                    return e.feedback_correct
+                else:
+                    e.feedback_incorrect += 1
+                    return e.feedback_incorrect
+        return 0
+
     async def close(self) -> None:
         pass
 

@@ -138,6 +138,8 @@ class CacheEntry(BaseModel):
         default=None, description="Template intent if generated via template"
     )
     usage_count: int = Field(default=1, ge=0)
+    feedback_correct: int = Field(default=0, ge=0)
+    feedback_incorrect: int = Field(default=0, ge=0)
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
@@ -163,5 +165,7 @@ class CacheResult(BaseModel):
     response_summary: str | None = None
     template_id: str | None = None
     usage_count: int = Field(default=0)
+    feedback_correct: int = Field(default=0)
+    feedback_incorrect: int = Field(default=0)
     created_at: datetime | None = None
     expires_at: datetime | None = Field(default=None, description="Scadenza dell'entry, se impostata.")

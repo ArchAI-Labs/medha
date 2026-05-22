@@ -61,3 +61,5 @@ jupyter notebook demo/
 | [21 — Cache Lifecycle](https://github.com/ArchAI-Labs/medha/blob/main/demo/21_cache_lifecycle.ipynb) | TTL, expiry, and invalidation strategies |
 | [22 — Observability](https://github.com/ArchAI-Labs/medha/blob/main/demo/22_observability.ipynb) | Stats, latency percentiles, and logging |
 | [23 — Batch Operations](https://github.com/ArchAI-Labs/medha/blob/main/demo/23_batch_ops.ipynb) | Bulk ingestion, export to DataFrame, and dedup |
+| [25 — Feedback Loop](https://github.com/ArchAI-Labs/medha/blob/main/demo/25_feedback_loop.ipynb) | Recording correct/incorrect signals and auto-invalidation |
+| [26 — CLI](https://github.com/ArchAI-Labs/medha/blob/main/demo/26_cli.ipynb) | All `medha` CLI commands against an in-memory backend |

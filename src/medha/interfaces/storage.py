@@ -165,6 +165,30 @@ class VectorStorageBackend(ABC):
         ...
 
     @abstractmethod
+    async def update_feedback(
+        self,
+        collection_name: str,
+        point_id: str,
+        correct: bool,
+    ) -> int:
+        """Increment feedback_correct or feedback_incorrect for a stored entry.
+
+        Args:
+            collection_name: Target collection.
+            point_id:        ID of the entry to update.
+            correct:         True → increment feedback_correct;
+                             False → increment feedback_incorrect.
+
+        Returns:
+            The new value of the incremented counter after the update.
+            Returns 0 if the entry is not found (no exception raised).
+
+        Raises:
+            StorageError: If the update fails.
+        """
+        ...
+
+    @abstractmethod
     async def close(self) -> None:
         """Release resources (close connections, etc.)."""
         ...

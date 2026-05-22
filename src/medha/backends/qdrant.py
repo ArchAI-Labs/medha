@@ -605,6 +605,44 @@ class QdrantBackend(VectorStorageBackend):
                 f"Qdrant update_usage_count failed on '{collection_name}': {e}"
             ) from e
 
+    async def update_feedback(
+        self, collection_name: str, point_id: str, correct: bool
+    ) -> int:
+        """Increment feedback_correct or feedback_incorrect for a stored entry."""
+        try:
+            points = await self.client.retrieve(
+                collection_name=collection_name,
+                ids=[point_id],
+                with_payload=True,
+            )
+
+            if not points:
+                logger.warning(
+                    "Point '%s' not found in '%s'", point_id, collection_name
+                )
+                return 0
+
+            payload = points[0].payload or {}
+            field = "feedback_correct" if correct else "feedback_incorrect"
+            new_val = payload.get(field, 0) + 1
+
+            await self.client.set_payload(
+                collection_name=collection_name,
+                payload={field: new_val},
+                points=[point_id],
+                wait=True,
+            )
+            logger.debug(
+                "Updated %s for '%s' to %d", field, point_id, new_val
+            )
+            return new_val
+        except StorageError:
+            raise
+        except Exception as e:
+            raise StorageError(
+                f"Qdrant update_feedback failed on '{collection_name}': {e}"
+            ) from e
+
     # --- Private methods ---
 
     def _build_client(self) -> AsyncQdrantClient:

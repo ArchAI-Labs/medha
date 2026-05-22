@@ -288,6 +288,21 @@ class WeaviateBackend(VectorStorageBackend):
                 f"Weaviate update_usage_count failed on '{collection_name}': {e}"
             ) from e
 
+    async def update_feedback(self, collection_name: str, id_: str, correct: bool) -> int:
+        collection = self._get_collection(collection_name)
+        try:
+            obj = await collection.query.fetch_object_by_id(id_)
+            if obj is None:
+                return 0
+            field = "feedback_correct" if correct else "feedback_incorrect"
+            current = int(obj.properties.get(field, 0))
+            await collection.data.update(uuid=id_, properties={field: current + 1})
+            return current + 1
+        except Exception as e:
+            raise StorageError(
+                f"Weaviate update_feedback failed on '{collection_name}': {e}"
+            ) from e
+
     async def find_expired(self, collection_name: str) -> list[str]:
         collection = self._get_collection(collection_name)
         now = _now_utc()

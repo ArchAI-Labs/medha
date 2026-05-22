@@ -387,6 +387,22 @@ class RedisVectorBackend(VectorStorageBackend):
                 f"Redis update_usage_count failed on '{collection_name}': {e}"
             ) from e
 
+    async def update_feedback(self, collection_name: str, id_: str, correct: bool) -> int:
+        if self._client is None:
+            raise StorageError("Not connected. Call connect() first.")
+        col_key = _key_prefix(self._settings.redis_key_prefix, collection_name)
+        key = f"{col_key}:{id_}"
+        field = "feedback_correct" if correct else "feedback_incorrect"
+        try:
+            exists = await self._client.hexists(key, "original_question")
+            if not exists:
+                return 0
+            return int(await self._client.hincrby(key, field, 1))
+        except Exception as e:
+            raise StorageError(
+                f"Redis update_feedback failed on '{collection_name}': {e}"
+            ) from e
+
     async def find_expired(self, collection_name: str) -> list[str]:
         if self._client is None:
             raise StorageError("Not connected. Call connect() first.")

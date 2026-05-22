@@ -36,6 +36,18 @@ LLMs regenerate the same structured queries thousands of times per day. Medha in
 
     Per-entry TTL, bulk ingestion, pattern and exact invalidation, hit-rate metrics, latency percentiles, and Prometheus-compatible observability.
 
+-   :material-thumb-up:{ .lg .middle } **Feedback Loop**
+
+    ---
+
+    Record correct/incorrect signals per cached entry. Optionally auto-invalidate entries that exceed an error threshold, keeping the cache self-healing over time.
+
+-   :material-console:{ .lg .middle } **CLI**
+
+    ---
+
+    `medha stats`, `warm`, `expire`, `dedup`, `invalidate`, `export`, and `feedback` — administer your cache from the terminal without writing Python code.
+
 </div>
 
 ---

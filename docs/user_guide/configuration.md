@@ -135,6 +135,24 @@ Medha is configured through the `Settings` class, which is backed by Pydantic Se
 
     **Environment variable prefix:** `MEDHA_COLLECT_STATS`, `MEDHA_LOG_*`
 
+??? info "Feedback Loop"
+
+    | Field | Type | Default | Description |
+    |---|---|---|---|
+    | `feedback_incorrect_threshold` | `int \| None` | `None` | Auto-invalidate an entry after this many incorrect feedback signals. `None` disables auto-invalidation. Must be ≥ 1. |
+
+    **Environment variable:** `MEDHA_FEEDBACK_INCORRECT_THRESHOLD`
+
+??? info "CLI"
+
+    | Field | Type | Default | Description |
+    |---|---|---|---|
+    | `embedder_type` | `str` | `"_noop"` | Embedder used by CLI commands. Accepted values: `fastembed`, `openai`, `cohere`, `gemini`, `_noop`. |
+    | `collection` | `str` | `"default"` | Default collection name for CLI commands. Overridable per-command with `--collection`. |
+    | `fastembed_model` | `str` | `"BAAI/bge-small-en-v1.5"` | FastEmbed model identifier used by `medha warm`. |
+
+    **Environment variables:** `MEDHA_EMBEDDER_TYPE`, `MEDHA_COLLECTION`, `MEDHA_FASTEMBED_MODEL`
+
 ??? info "Security & File I/O"
 
     | Field | Type | Default | Description |
