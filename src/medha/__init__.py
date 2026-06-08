@@ -1,6 +1,6 @@
 """Medha - Semantic Memory for AI Text-to-Query systems."""
 
-__version__ = "0.3.0"
+__version__ = "0.4.1"
 
 from medha.backends.memory import InMemoryBackend
 from medha.config import Settings

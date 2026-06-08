@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "medha-archai"
-version = "0.4.0"
+version = "0.4.1"
 description = "Semantic Memory for AI Text-to-Query systems"
 readme = "README.md"
 license = { text = "Apache-2.0" }

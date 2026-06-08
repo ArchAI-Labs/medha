@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from unittest.mock import AsyncMock, patch
+from contextlib import asynccontextmanager
+from unittest.mock import patch
 
 import pytest
 
@@ -38,10 +39,13 @@ def e2e_medha(mock_embedder):
 
 
 def _invoke(m: Medha, *args: str, env: dict | None = None):
-    """Run a CLI command with _build_medha patched to return m and __aexit__ patched to no-op."""
-    with patch.object(Medha, "__aexit__", _noop_aexit):
-        with patch("medha.cli._app._build_medha", new=AsyncMock(return_value=m)):
-            return runner.invoke(app, list(args), env=env)
+    """Run a CLI command with _build_medha patched as an async context manager yielding m."""
+    @asynccontextmanager
+    async def _mock_build(*_args, **_kwargs):
+        yield m
+
+    with patch("medha.cli._app._build_medha", new=_mock_build):
+        return runner.invoke(app, list(args), env=env)
 
 
 @pytest.mark.cli
@@ -148,3 +152,88 @@ class TestCliE2E:
 
         assert result.exit_code == 0
         assert "Feedback recorded." in result.output
+
+
+# ---------------------------------------------------------------------------
+# New integration tests: search e2e and health e2e
+# ---------------------------------------------------------------------------
+
+@pytest.mark.cli
+def test_search_e2e_hit(tmp_path):
+    """Verify that a stored question is found via search_sync with a real FastEmbedAdapter."""
+    pytest.importorskip("fastembed")
+    pytest.importorskip("typer.testing")
+
+    from medha.embeddings.fastembed_adapter import FastEmbedAdapter
+
+    # Demonstrate that CLI warm works end-to-end with a real embedder.
+    entry = {"question": "How many users are there?", "generated_query": "SELECT COUNT(*) FROM users"}
+    jsonl_file = tmp_path / "warm.jsonl"
+    jsonl_file.write_text(json.dumps(entry) + "\n")
+
+    warm_result = runner.invoke(
+        app,
+        ["warm", str(jsonl_file)],
+        env={"MEDHA_BACKEND_TYPE": "memory", "MEDHA_EMBEDDER_TYPE": "fastembed"},
+    )
+    assert warm_result.exit_code == 0
+
+    # InMemoryBackend state does not survive across CLI invocations, so the
+    # actual hit assertion uses an in-process Medha instance.
+    settings = Settings(
+        backend_type="memory",
+        embedder_type="fastembed",
+        score_threshold_exact=0.99,
+        score_threshold_semantic=0.70,
+    )
+    embedder = FastEmbedAdapter(model_name=settings.fastembed_model)
+    backend = InMemoryBackend()
+    m = Medha(
+        collection_name="search_e2e",
+        embedder=embedder,
+        backend=backend,
+        settings=settings,
+    )
+    asyncio.run(m.start())
+    try:
+        question = "How many users are there?"
+        asyncio.run(m.store(question, "SELECT COUNT(*) FROM users"))
+        result = m.search_sync(question)
+        assert result.strategy.value != "no_match"
+        assert result.generated_query == "SELECT COUNT(*) FROM users"
+    finally:
+        asyncio.run(m.close())
+
+
+@pytest.mark.cli
+def test_health_ok_e2e():
+    """Health command against real InMemoryBackend + FastEmbedAdapter must exit 0 and report OK."""
+    pytest.importorskip("fastembed")
+    pytest.importorskip("typer.testing")
+
+    result = runner.invoke(
+        app,
+        ["health"],
+        env={"MEDHA_BACKEND_TYPE": "memory", "MEDHA_EMBEDDER_TYPE": "fastembed"},
+    )
+
+    assert result.exit_code == 0
+    assert "OK" in result.output
+
+
+@pytest.mark.cli
+def test_health_json_e2e():
+    """Health --json against real backends must return valid JSON with overall=='ok'."""
+    pytest.importorskip("fastembed")
+    pytest.importorskip("typer.testing")
+
+    result = runner.invoke(
+        app,
+        ["health", "--json"],
+        env={"MEDHA_BACKEND_TYPE": "memory", "MEDHA_EMBEDDER_TYPE": "fastembed"},
+    )
+
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert data["overall"] == "ok"
+    assert data["backend"]["status"] == "ok"

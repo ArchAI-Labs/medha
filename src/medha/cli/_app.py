@@ -3,14 +3,15 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Optional
+from typing import AsyncIterator, Optional
 
 import typer
 
 from medha.config import Settings
 from medha.core import Medha
-from medha.exceptions import ConfigurationError
+from medha.exceptions import ConfigurationError, StorageError
 from medha.interfaces.embedder import BaseEmbedder
 
 app = typer.Typer(help="Medha cache management CLI.")
@@ -112,8 +113,9 @@ def _resolve_embedder(settings: Settings) -> BaseEmbedder:
     raise ConfigurationError(f"Unknown embedder_type: '{et}'")
 
 
-async def _build_medha(collection: str, settings: Settings) -> Medha:
-    """Instantiate and start a Medha instance for the given collection."""
+@asynccontextmanager
+async def _build_medha(collection: str, settings: Settings) -> AsyncIterator[Medha]:
+    """Instantiate, start, and close a Medha instance for the given collection."""
     embedder = _resolve_embedder(settings)
     m = Medha(
         collection_name=collection,
@@ -121,7 +123,10 @@ async def _build_medha(collection: str, settings: Settings) -> Medha:
         settings=settings,
     )
     await m.start()
-    return m
+    try:
+        yield m
+    finally:
+        await m.close()
 
 
 @app.command()
@@ -129,6 +134,7 @@ def stats(
     collection: Optional[str] = typer.Option(
         None, "--collection", help="Collection name (env: MEDHA_COLLECTION)."
     ),
+    json_output: bool = typer.Option(False, "--json", help="Print result as JSON."),
 ) -> None:
     """Show structural stats for a collection.
 
@@ -141,19 +147,84 @@ def stats(
 
     async def _run() -> None:
         try:
-            m = await _build_medha(coll, settings)
+            async with _build_medha(coll, settings) as m:
+                main_count = await m._backend.count(m._collection_name)
+                try:
+                    tmpl_count = await m._backend.count(m._collection_name + "_templates")
+                except StorageError:
+                    tmpl_count = 0
+                backend_name = type(m._backend).__name__
         except (ConfigurationError, RuntimeError) as exc:
             typer.echo(f"Error: {exc}", err=True)
             raise typer.Exit(code=1)
-        async with m:
-            main_count = await m._backend.count(m._collection_name)
-            tmpl_count = await m._backend.count(m._template_collection)
-            backend_name = type(m._backend).__name__
-        typer.echo(f"Collection : {coll}")
-        typer.echo(f"Backend    : {backend_name} ({settings.backend_type})")
-        typer.echo(f"Entries    : {main_count} (main)  {tmpl_count} (templates)")
+        if json_output:
+            import json
+            print(json.dumps({
+                "collection": coll,
+                "backend_type": settings.backend_type,
+                "entries": main_count,
+                "templates": tmpl_count,
+            }, indent=2))
+        else:
+            typer.echo(f"Collection : {coll}")
+            typer.echo(f"Backend    : {backend_name} ({settings.backend_type})")
+            typer.echo(f"Entries    : {main_count} (main)  {tmpl_count} (templates)")
 
     asyncio.run(_run())
+
+
+@app.command()
+def search(
+    question: str = typer.Argument(..., help="Natural-language question to look up."),
+    collection: Optional[str] = typer.Option(
+        None, "--collection", "-c",
+        help="Collection to search. Defaults to MEDHA_COLLECTION (or 'default').",
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Print result as JSON."),
+) -> None:
+    """Search the cache for a question and print the best match."""
+    settings = Settings()
+    coll = collection or settings.collection
+
+    if settings.embedder_type == "_noop":
+        typer.echo(
+            "Error: 'medha search' requires a real embedder.\n"
+            "Set MEDHA_EMBEDDER_TYPE=fastembed (or openai/cohere/gemini) and install the\n"
+            "matching extra.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        _resolve_embedder(settings)
+    except (ConfigurationError, RuntimeError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1)
+
+    async def _run():
+        async with _build_medha(coll, settings) as m:
+            return await m.search(question)
+
+    result = asyncio.run(_run())
+
+    if json_output:
+        import json
+        print(json.dumps({
+            "strategy": result.strategy.value,
+            "score": result.confidence,
+            "generated_query": result.generated_query,
+            "response_summary": result.response_summary,
+            "hit": result.strategy.value != "no_match",
+        }, indent=2))
+    else:
+        if result.strategy.value == "no_match":
+            typer.echo("No cache hit.")
+        else:
+            typer.echo(f"Strategy : {result.strategy.value}")
+            typer.echo(f"Score    : {result.confidence:.4f}")
+            typer.echo(f"Query    : {result.generated_query}")
+            if result.response_summary:
+                typer.echo(f"Summary  : {result.response_summary}")
 
 
 @app.command()
@@ -187,27 +258,25 @@ def warm(
         raise typer.Exit(code=1)
 
     async def _run() -> None:
-        try:
-            m = await _build_medha(coll, settings)
-        except (ConfigurationError, RuntimeError) as exc:
-            typer.echo(f"Error: {exc}", err=True)
-            raise typer.Exit(code=1)
-
         stored = 0
 
         def _on_progress(done: int, total: int) -> None:
             typer.echo(f"Progress: {done}/{total} entries stored.")
 
-        async with m:
-            try:
-                stored = await m.warm_from_file(
-                    str(file),
-                    batch_size=batch_size,
-                    on_progress=_on_progress,
-                )
-            except RuntimeError as exc:
-                typer.echo(f"Error: {exc}", err=True)
-                raise typer.Exit(code=1)
+        try:
+            async with _build_medha(coll, settings) as m:
+                try:
+                    stored = await m.warm_from_file(
+                        str(file),
+                        batch_size=batch_size,
+                        on_progress=_on_progress,
+                    )
+                except RuntimeError as exc:
+                    typer.echo(f"Error: {exc}", err=True)
+                    raise typer.Exit(code=1)
+        except (ConfigurationError, RuntimeError) as exc:
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(code=1)
 
         typer.echo(f"Warmed {stored} entries into '{coll}'.")
 
@@ -227,12 +296,11 @@ def invalidate(
 
     async def _run() -> None:
         try:
-            m = await _build_medha(coll, settings)
+            async with _build_medha(coll, settings) as m:
+                removed = await m.invalidate(question)
         except (ConfigurationError, RuntimeError) as exc:
             typer.echo(f"Error: {exc}", err=True)
             raise typer.Exit(code=1)
-        async with m:
-            removed = await m.invalidate(question)
         typer.echo("Removed." if removed else "Not found.")
 
     asyncio.run(_run())
@@ -264,12 +332,11 @@ def invalidate_collection(
 
     async def _run() -> None:
         try:
-            m = await _build_medha(coll, settings)
+            async with _build_medha(coll, settings) as m:
+                deleted = await m.invalidate_collection()
         except (ConfigurationError, RuntimeError) as exc:
             typer.echo(f"Error: {exc}", err=True)
             raise typer.Exit(code=1)
-        async with m:
-            deleted = await m.invalidate_collection()
         typer.echo(f"Deleted {deleted} entries from '{coll}'.")
 
     asyncio.run(_run())
@@ -287,12 +354,11 @@ def expire(
 
     async def _run() -> None:
         try:
-            m = await _build_medha(coll, settings)
+            async with _build_medha(coll, settings) as m:
+                deleted = await m.expire()
         except (ConfigurationError, RuntimeError) as exc:
             typer.echo(f"Error: {exc}", err=True)
             raise typer.Exit(code=1)
-        async with m:
-            deleted = await m.expire()
         typer.echo(f"Deleted {deleted} expired entries.")
 
     asyncio.run(_run())
@@ -323,12 +389,11 @@ def dedup(
 
     async def _run() -> None:
         try:
-            m = await _build_medha(coll, settings)
+            async with _build_medha(coll, settings) as m:
+                removed = await m.dedup_collection()
         except (ConfigurationError, RuntimeError) as exc:
             typer.echo(f"Error: {exc}", err=True)
             raise typer.Exit(code=1)
-        async with m:
-            removed = await m.dedup_collection()
         typer.echo(f"Removed {removed} duplicate entries.")
 
     asyncio.run(_run())
@@ -370,16 +435,15 @@ def export(
 
     async def _run() -> None:
         try:
-            m = await _build_medha(coll, settings)
+            async with _build_medha(coll, settings) as m:
+                try:
+                    df = await m.export_to_dataframe()
+                except ConfigurationError as exc:
+                    typer.echo(f"Error: {exc}", err=True)
+                    raise typer.Exit(code=1)
         except (ConfigurationError, RuntimeError) as exc:
             typer.echo(f"Error: {exc}", err=True)
             raise typer.Exit(code=1)
-        async with m:
-            try:
-                df = await m.export_to_dataframe()
-            except ConfigurationError as exc:
-                typer.echo(f"Error: {exc}", err=True)
-                raise typer.Exit(code=1)
 
         if format_ == "csv":
             content = df.to_csv(index=False)
@@ -426,12 +490,75 @@ def feedback(
 
     async def _run() -> None:
         try:
-            m = await _build_medha(coll, settings)
+            async with _build_medha(coll, settings) as m:
+                found = await m.feedback(question, correct=correct)
         except (ConfigurationError, RuntimeError) as exc:
             typer.echo(f"Error: {exc}", err=True)
             raise typer.Exit(code=1)
-        async with m:
-            found = await m.feedback(question, correct=correct)
         typer.echo("Feedback recorded." if found else "Entry not found.")
 
     asyncio.run(_run())
+
+
+@app.command()
+def health(
+    collection: Optional[str] = typer.Option(
+        None, "--collection", "-c",
+        help="Collection to probe. Defaults to MEDHA_COLLECTION (or 'default').",
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Print result as JSON."),
+) -> None:
+    """Check connectivity to the configured backend and embedder."""
+    settings = Settings()
+    coll = collection or settings.collection
+
+    async def _probe_backend() -> dict:
+        try:
+            async with _build_medha(coll, settings) as m:
+                entries = await m._backend.count(coll)
+            return {"status": "ok", "entries": entries}
+        except Exception as exc:
+            return {"status": "error", "detail": str(exc)}
+
+    async def _probe_embedder() -> dict:
+        if settings.embedder_type == "_noop":
+            return {"status": "skipped", "detail": "embedder_type is _noop"}
+        try:
+            embedder = _resolve_embedder(settings)
+            await embedder.aembed("health check")
+            return {"status": "ok", "model": embedder.model_name, "dimension": embedder.dimension}
+        except Exception as exc:
+            return {"status": "error", "detail": str(exc)}
+
+    async def _run() -> tuple[dict, dict]:
+        backend_probe = await _probe_backend()
+        embedder_probe = await _probe_embedder()
+        return backend_probe, embedder_probe
+
+    backend_probe, embedder_probe = asyncio.run(_run())
+
+    overall = (
+        "ok"
+        if backend_probe["status"] in ("ok", "skipped")
+        and embedder_probe["status"] in ("ok", "skipped")
+        else "error"
+    )
+
+    if json_output:
+        import json
+        print(json.dumps({
+            "overall": overall,
+            "backend": backend_probe,
+            "embedder": embedder_probe,
+        }, indent=2))
+    else:
+        b_detail = backend_probe.get("detail") or f"{backend_probe.get('entries', 0)} entries"
+        e_detail = embedder_probe.get("detail") or (
+            f"{embedder_probe.get('model', '')}  dim={embedder_probe.get('dimension', '')}"
+        )
+        typer.echo(f"Backend  [{backend_probe['status'].upper()}]  {b_detail}")
+        typer.echo(f"Embedder [{embedder_probe['status'].upper()}]  {e_detail}")
+        typer.echo(f"Overall  : {overall.upper()}")
+
+    if overall != "ok":
+        raise typer.Exit(code=1)

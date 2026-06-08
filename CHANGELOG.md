@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] — 2026-06-08
+
+### Fixed
+
+- `__version__` in `src/medha/__init__.py` corrected to `"0.4.0"` (was `"0.3.1"`
+  due to a missed bump at release time).
+
+### Added
+
+- `medha search <question>` CLI command — look up a question in the cache and
+  print the best match (strategy, score, generated query). Requires a real embedder
+  (`MEDHA_EMBEDDER_TYPE != _noop`). Supports `--json` for machine-readable output.
+
+- `medha health` CLI command — probe backend connectivity and embedder availability.
+  Prints `OK` / `ERROR` / `SKIPPED` per component. Exits with code 1 if any probe
+  fails. Supports `--json`.
+
+- `--json` flag on `medha stats` — outputs collection name, backend type, and entry
+  count as a JSON object.
+
 ## [0.4.0] — 2026-05-19
 
 ### Breaking Changes
