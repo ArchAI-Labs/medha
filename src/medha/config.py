@@ -329,6 +329,15 @@ class Settings(BaseSettings):
     )
 
     # --- Cache lifecycle ---
+    validate_on_start: bool = Field(
+        default=True,
+        description=(
+            "When True, start() probes the backend with a count() call to verify "
+            "connectivity before returning. Set to False to skip the probe "
+            "(e.g. in unit tests where the backend is not yet initialized). "
+            "Env var: MEDHA_VALIDATE_ON_START."
+        ),
+    )
     default_ttl_seconds: int | None = Field(
         default=None,
         ge=1,

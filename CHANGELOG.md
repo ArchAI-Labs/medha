@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.3] — 2026-06-09
+
+### Added
+
+- **Async context manager**: `Medha` now implements `__aenter__` / `__aexit__`.
+  Use `async with Medha(...) as m:` instead of calling `start()` and `close()`
+  manually. `close()` is guaranteed to run even if an exception occurs.
+
+- **`Medha.search_batch(questions)`** — look up a list of questions in a single
+  call. All questions are embedded via one `aembed_batch()` round-trip; waterfall
+  searches run concurrently via `asyncio.gather()`. Returns results in input order.
+  Sync wrapper: `search_batch_sync()`.
+
+- **Startup validation**: `start()` now calls `count()` on the collection after
+  `initialize()` to verify backend connectivity. Raises `StorageError` if the probe
+  fails. Disable with `Settings(validate_on_start=False)` (or env var
+  `MEDHA_VALIDATE_ON_START=false`).
+
+- `Settings.validate_on_start` (default `True`) — toggle backend probe in `start()`.
+
 ## [0.4.2] — 2026-06-09
 
 ### Added
