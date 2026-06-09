@@ -1,6 +1,6 @@
 # Embedders
 
-Medha is embedder-agnostic. You plug in any implementation of `BaseEmbedder` at construction time. Four adapters are provided out of the box.
+Medha is embedder-agnostic. You plug in any implementation of `BaseEmbedder` at construction time. Six adapters are provided out of the box.
 
 ---
 
@@ -10,8 +10,10 @@ Medha is embedder-agnostic. You plug in any implementation of `BaseEmbedder` at 
 |---|---|---|---|---|
 | `FastEmbedAdapter` | 384–768 | No | Free | Dev, on-prem, air-gapped |
 | `OpenAIAdapter` | 1536–3072 | Yes | $ | General purpose |
+| `OpenAICompatibleAdapter` | model-dependent | Optional | Free–$ | Ollama, vLLM, LocalAI, LM Studio |
 | `CohereAdapter` | 1024 | Yes | $$ | Multilingual, enterprise |
 | `GeminiAdapter` | 768 | Yes | $ | Google ecosystem |
+| `MistralAdapter` | 1024 | Yes | $ | Mistral API |
 
 !!! tip
 
@@ -161,6 +163,75 @@ async def main():
 
 asyncio.run(main())
 ```
+
+---
+
+## `OpenAICompatibleAdapter` — Ollama / vLLM / LocalAI / LM Studio
+
+!!! info "Install"
+
+    ```bash
+    pip install "medha-archai[openai]"
+    ```
+
+Connects to any OpenAI-compatible embeddings endpoint. Works with Ollama, vLLM, LocalAI, LM Studio, and any server that implements the `/v1/embeddings` API.
+
+```python
+from medha.embeddings.openai_compatible_adapter import OpenAICompatibleAdapter
+from medha.config import Settings
+
+settings = Settings(
+    embedder_type="openai-compatible",
+    oai_compat_base_url="http://localhost:11434/v1",   # Ollama default
+    oai_compat_model="nomic-embed-text",
+)
+embedder = OpenAICompatibleAdapter(settings)
+```
+
+**Environment variables:**
+
+| Variable | Default | Description |
+|---|---|---|
+| `MEDHA_OAI_COMPAT_BASE_URL` | `http://localhost:11434/v1` | Endpoint base URL |
+| `MEDHA_OAI_COMPAT_MODEL` | `nomic-embed-text` | Model name to request |
+| `MEDHA_OAI_COMPAT_API_KEY` | `None` | API key (most local servers accept any non-empty string) |
+
+!!! tip
+
+    Many local servers require a non-empty `api_key`. If your server rejects the request, set `MEDHA_OAI_COMPAT_API_KEY=ollama` (the conventional placeholder for Ollama) or any non-empty string.
+
+---
+
+## `MistralAdapter` — Mistral API
+
+!!! info "Install"
+
+    ```bash
+    pip install "medha-archai[mistral]"
+    ```
+
+Uses the Mistral Embeddings API (`mistral-embed`, 1024 dimensions).
+
+```python
+import os
+from medha.embeddings.mistral_adapter import MistralAdapter
+from medha.config import Settings
+
+settings = Settings(
+    embedder_type="mistral",
+    mistral_api_key=os.environ["MISTRAL_API_KEY"],
+    mistral_model="mistral-embed",
+)
+embedder = MistralAdapter(settings)
+```
+
+**Environment variables:**
+
+| Variable | Default | Description |
+|---|---|---|
+| `MEDHA_MISTRAL_API_KEY` | `None` | Mistral API key |
+| `MEDHA_MISTRAL_MODEL` | `mistral-embed` | Model identifier |
+| `MEDHA_MISTRAL_BATCH_SIZE` | `50` | Max texts per API request (1–512) |
 
 ---
 
