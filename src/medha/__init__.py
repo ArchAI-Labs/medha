@@ -1,6 +1,6 @@
 """Medha - Semantic Memory for AI Text-to-Query systems."""
 
-__version__ = "0.4.1"
+__version__ = "0.4.2"
 
 from medha.backends.memory import InMemoryBackend
 from medha.config import Settings
@@ -78,6 +78,18 @@ except ImportError:
 try:
     from medha.embeddings.gemini_adapter import GeminiAdapter
     _optional.append("GeminiAdapter")
+except ImportError:
+    pass
+
+try:
+    from medha.embeddings.openai_compatible_adapter import OpenAICompatibleAdapter
+    _optional.append("OpenAICompatibleAdapter")
+except ImportError:
+    pass
+
+try:
+    from medha.embeddings.mistral_adapter import MistralAdapter
+    _optional.append("MistralAdapter")
 except ImportError:
     pass
 

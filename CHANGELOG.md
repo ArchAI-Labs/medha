@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2] — 2026-06-09
+
+### Added
+
+- **`OpenAICompatibleAdapter`**: embedder adapter for any OpenAI-compatible
+  endpoint (Ollama, vLLM, LocalAI, LM Studio). Reuses the `[openai]` extra.
+  Select with `MEDHA_EMBEDDER_TYPE=openai-compatible`;
+  configure endpoint via `MEDHA_OAI_COMPAT_BASE_URL` (default:
+  `http://localhost:11434/v1`) and `MEDHA_OAI_COMPAT_MODEL` (default:
+  `nomic-embed-text`).
+
+- **`MistralAdapter`**: embedder adapter for the Mistral Embeddings API
+  (`mistral-embed`, 1024 dimensions). Install with
+  `pip install "medha-archai[mistral]"`. Select with
+  `MEDHA_EMBEDDER_TYPE=mistral`; configure with `MEDHA_MISTRAL_API_KEY`.
+
+- `Settings.oai_compat_base_url`, `Settings.oai_compat_model`,
+  `Settings.oai_compat_api_key` — configuration for `OpenAICompatibleAdapter`.
+
+- `Settings.mistral_api_key`, `Settings.mistral_model`,
+  `Settings.mistral_batch_size` — configuration for `MistralAdapter`.
+
+- `embedder_type` now accepts `"openai-compatible"` and `"mistral"` in addition
+  to the existing values.
+
 ## [0.4.1] — 2026-06-08
 
 ### Fixed

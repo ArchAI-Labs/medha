@@ -110,6 +110,18 @@ def _resolve_embedder(settings: Settings) -> BaseEmbedder:
             raise ConfigurationError("GOOGLE_API_KEY env var is not set.")
         from medha.embeddings.gemini_adapter import GeminiAdapter
         return GeminiAdapter(api_key=api_key)
+    if et == "openai-compatible":
+        try:
+            from medha.embeddings.openai_compatible_adapter import OpenAICompatibleAdapter
+        except ImportError:
+            raise ConfigurationError("pip install 'medha-archai[openai]'")
+        return OpenAICompatibleAdapter(settings)
+    if et == "mistral":
+        try:
+            from medha.embeddings.mistral_adapter import MistralAdapter
+        except ImportError:
+            raise ConfigurationError("pip install 'medha-archai[mistral]'")
+        return MistralAdapter(settings)
     raise ConfigurationError(f"Unknown embedder_type: '{et}'")
 
 
