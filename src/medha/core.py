@@ -299,6 +299,15 @@ class Medha:
         if self._settings.embedding_cache_path:
             self._load_embedding_cache_from_disk()
 
+        if self._settings.validate_on_start:
+            try:
+                await self._backend.count(self._collection_name)
+            except Exception as exc:
+                raise StorageError(
+                    f"Backend connectivity check failed at start(): {exc}. "
+                    f"Set Settings(validate_on_start=False) to skip this check."
+                ) from exc
+
         if self._settings.cleanup_interval_seconds:
             self._cleanup_task = asyncio.create_task(self._cleanup_loop())
 
@@ -359,6 +368,32 @@ class Medha:
         await self._stats.record(result.strategy, latency_ms)
         return result
 
+    async def search_batch(
+        self,
+        questions: list[str],
+        collection_name: str | None = None,
+    ) -> list[CacheHit]:
+        """Search for multiple questions, embedding them in a single batch call.
+
+        Returns results in the same order as the input questions.
+        Each result follows the same waterfall search strategy as search().
+        """
+        if not questions:
+            return []
+        collection = collection_name or self._collection_name
+        normalized = [normalize_question(q) for q in questions]
+        try:
+            vectors = await self._embed_with_timeout(normalized)
+        except Exception as e:
+            logger.error("search_batch: embedding failed: %s", e)
+            return [CacheHit(strategy=SearchStrategy.ERROR)] * len(questions)
+        tasks = [
+            self._waterfall_search(q, v, collection)
+            for q, v in zip(questions, vectors)
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=False)
+        return list(results)
+
     async def _search_impl(self, question: str) -> CacheHit:
         try:
             if not question or not question.strip():
@@ -375,6 +410,24 @@ class Medha:
 
             logger.debug("Search started for: '%s'", question[:80])
 
+            embedding = await self._get_embedding(question)
+            if embedding is None:
+                logger.error("Embedding failed, aborting search for: '%s'", question[:50])
+                return CacheHit(strategy=SearchStrategy.ERROR)
+
+            return await self._waterfall_search(question, embedding, self._collection_name)
+
+        except Exception as e:
+            logger.error("Search failed for '%s': %s", question[:50], e, exc_info=True)
+            return CacheHit(strategy=SearchStrategy.ERROR)
+
+    async def _waterfall_search(
+        self,
+        question: str,
+        vector: list[float],
+        collection_name: str,
+    ) -> CacheHit:
+        try:
             # --- Tier 0: L1 Cache ---
             l1_hit = await self._check_l1_cache(question)
             if l1_hit:
@@ -394,18 +447,12 @@ class Medha:
                 return template_hit
             logger.debug("Tier 1 template MISS")
 
-            # --- Get embedding (shared by Tier 2, 3) ---
-            embedding = await self._get_embedding(question)
-            if embedding is None:
-                logger.error("Embedding failed, aborting search for: '%s'", question[:50])
-                return CacheHit(strategy=SearchStrategy.ERROR)
-
             # --- Tier 2 + 3: Exact and Semantic in parallel ---
             # Running them concurrently reduces wall-clock latency from
             # ~(t_exact + t_semantic) to ~max(t_exact, t_semantic).
             exact_hit, semantic_hit = await asyncio.gather(
-                self._search_exact(embedding),
-                self._search_semantic(embedding),
+                self._search_exact(vector, collection_name),
+                self._search_semantic(vector, collection_name),
             )
 
             if exact_hit:
@@ -429,7 +476,7 @@ class Medha:
             logger.debug("Tier 3 semantic MISS (threshold=%.2f)", self._settings.score_threshold_semantic)
 
             # --- Tier 4: Fuzzy Matching ---
-            fuzzy_hit = await self._search_fuzzy(question, embedding)
+            fuzzy_hit = await self._search_fuzzy(question, vector, collection_name)
             if fuzzy_hit:
                 await self._store_in_l1(question, fuzzy_hit)
                 logger.debug("Tier 4 fuzzy HIT: confidence=%.4f", fuzzy_hit.confidence)
@@ -440,7 +487,7 @@ class Medha:
             return CacheHit(strategy=SearchStrategy.NO_MATCH)
 
         except Exception as e:
-            logger.error("Search failed for '%s': %s", question[:50], e, exc_info=True)
+            logger.error("Waterfall search failed for '%s': %s", question[:50], e, exc_info=True)
             return CacheHit(strategy=SearchStrategy.ERROR)
 
     # --- Tier Implementations ---
@@ -561,14 +608,14 @@ class Medha:
             return None
         return best_hit
 
-    async def _search_exact(self, embedding: list[float]) -> CacheHit | None:
+    async def _search_exact(self, embedding: list[float], collection_name: str | None = None) -> CacheHit | None:
         """Search for exact vector match (score >= score_threshold_exact).
 
         Uses settings.score_threshold_exact (default 0.99).
         Returns the top-1 result if above threshold.
         """
         results = await self._backend.search(
-            collection_name=self._collection_name,
+            collection_name=collection_name or self._collection_name,
             vector=embedding,
             limit=1,
             score_threshold=self._settings.score_threshold_exact,
@@ -585,14 +632,14 @@ class Medha:
             )
         return None
 
-    async def _search_semantic(self, embedding: list[float]) -> CacheHit | None:
+    async def _search_semantic(self, embedding: list[float], collection_name: str | None = None) -> CacheHit | None:
         """Search for semantic similarity (score >= score_threshold_semantic).
 
         Uses settings.score_threshold_semantic (default 0.90).
         Returns the top-1 result with a slight confidence penalty (0.9x).
         """
         results = await self._backend.search(
-            collection_name=self._collection_name,
+            collection_name=collection_name or self._collection_name,
             vector=embedding,
             limit=3,
             score_threshold=self._settings.score_threshold_semantic,
@@ -610,7 +657,7 @@ class Medha:
         return None
 
     async def _search_fuzzy(
-        self, question: str, embedding: list[float] | None = None
+        self, question: str, embedding: list[float] | None = None, collection_name: str | None = None
     ) -> CacheHit | None:
         """Search using Levenshtein distance (optional, requires rapidfuzz).
 
@@ -629,6 +676,7 @@ class Medha:
             logger.debug("Fuzzy search skipped: rapidfuzz not installed")
             return None
 
+        coll = collection_name or self._collection_name
         normalized = normalize_question(question)
         threshold = self._settings.score_threshold_fuzzy
 
@@ -639,7 +687,7 @@ class Medha:
         if embedding is not None:
             # Fast path: vector pre-filter → fuzzy only on top-K candidates
             candidates = await self._backend.search(
-                collection_name=self._collection_name,
+                collection_name=coll,
                 vector=embedding,
                 limit=self._settings.fuzzy_prefilter_top_k,
                 score_threshold=self._settings.score_threshold_fuzzy_prefilter,
@@ -663,7 +711,7 @@ class Medha:
             offset = None
             while True:
                 results, offset = await self._backend.scroll(
-                    collection_name=self._collection_name,
+                    collection_name=coll,
                     limit=500,
                     offset=offset,
                 )
@@ -1528,6 +1576,12 @@ class Medha:
 
     # --- Embedding Cache ---
 
+    async def _embed_with_timeout(self, texts: list[str]) -> list[list[float]]:
+        coro = self._embedder.aembed_batch(texts)
+        if self._settings.embedding_timeout is not None:
+            coro = asyncio.wait_for(coro, timeout=self._settings.embedding_timeout)
+        return await coro
+
     async def _get_embedding(self, question: str) -> list[float] | None:
         """Get or compute the embedding for a question.
 
@@ -1700,6 +1754,14 @@ class Medha:
     def search_sync(self, question: str) -> CacheHit:
         """Synchronous wrapper for search()."""
         return BaseEmbedder._run_sync(self.search(question))
+
+    def search_batch_sync(
+        self,
+        questions: list[str],
+        collection_name: str | None = None,
+    ) -> list[CacheHit]:
+        """Synchronous wrapper for search_batch()."""
+        return BaseEmbedder._run_sync(self.search_batch(questions, collection_name))
 
     def store_sync(self, question: str, generated_query: str, **kwargs: Any) -> bool:
         """Synchronous wrapper for store()."""
