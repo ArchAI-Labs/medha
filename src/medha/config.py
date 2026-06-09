@@ -329,6 +329,15 @@ class Settings(BaseSettings):
     )
 
     # --- Cache lifecycle ---
+    validate_on_start: bool = Field(
+        default=True,
+        description=(
+            "When True, start() probes the backend with a count() call to verify "
+            "connectivity before returning. Set to False to skip the probe "
+            "(e.g. in unit tests where the backend is not yet initialized). "
+            "Env var: MEDHA_VALIDATE_ON_START."
+        ),
+    )
     default_ttl_seconds: int | None = Field(
         default=None,
         ge=1,
@@ -387,7 +396,7 @@ class Settings(BaseSettings):
     )
 
     # --- CLI ---
-    embedder_type: Literal["fastembed", "openai", "cohere", "gemini", "_noop"] = Field(
+    embedder_type: Literal["fastembed", "openai", "openai-compatible", "cohere", "gemini", "mistral", "_noop"] = Field(
         default="_noop",
         description=(
             "Embedder to use. '_noop' is the default (no embedding). "
@@ -404,6 +413,55 @@ class Settings(BaseSettings):
     fastembed_model: str = Field(
         default="BAAI/bge-small-en-v1.5",
         description="FastEmbed model identifier used by the CLI. Env var: MEDHA_FASTEMBED_MODEL.",
+    )
+
+    # --- OpenAI ---
+
+    # --- OpenAI-compatible (Ollama, vLLM, LocalAI, LM Studio) ---
+    oai_compat_base_url: str = Field(
+        default="http://localhost:11434/v1",
+        description=(
+            "Base URL for any OpenAI-compatible embeddings endpoint. "
+            "Env var: MEDHA_OAI_COMPAT_BASE_URL."
+        ),
+    )
+    oai_compat_model: str = Field(
+        default="nomic-embed-text",
+        description=(
+            "Model name to request from the OpenAI-compatible endpoint. "
+            "Env var: MEDHA_OAI_COMPAT_MODEL."
+        ),
+    )
+    oai_compat_api_key: SecretStr | None = Field(
+        default=None,
+        description=(
+            "API key for the OpenAI-compatible endpoint (optional; many local servers "
+            "accept any non-empty string). Env var: MEDHA_OAI_COMPAT_API_KEY."
+        ),
+    )
+
+    # --- Cohere ---
+
+    # --- Mistral ---
+    mistral_api_key: SecretStr | None = Field(
+        default=None,
+        description="Mistral API key. Env var: MEDHA_MISTRAL_API_KEY.",
+    )
+    mistral_model: str = Field(
+        default="mistral-embed",
+        description=(
+            "Mistral embedding model identifier. "
+            "Env var: MEDHA_MISTRAL_MODEL."
+        ),
+    )
+    mistral_batch_size: int = Field(
+        default=50,
+        ge=1,
+        le=512,
+        description=(
+            "Maximum number of texts per Mistral embed API request. "
+            "Env var: MEDHA_MISTRAL_BATCH_SIZE."
+        ),
     )
 
     # --- Validators ---

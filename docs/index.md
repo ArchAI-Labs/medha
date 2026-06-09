@@ -24,11 +24,11 @@ LLMs regenerate the same structured queries thousands of times per day. Medha in
 
     In-memory for development, Qdrant, pgvector, Elasticsearch, VectorChord, Chroma, Weaviate, Redis Stack, Azure AI Search, and LanceDB for production.
 
--   :material-chip:{ .lg .middle } **4 Embedding Providers**
+-   :material-chip:{ .lg .middle } **6 Embedding Providers**
 
     ---
 
-    Local ONNX via FastEmbed (no API key, no cost) or cloud providers: OpenAI, Cohere, and Gemini. Swap providers without losing cached data.
+    Local ONNX via FastEmbed (no API key, no cost) or cloud providers: OpenAI, OpenAI-compatible (Ollama, vLLM, LocalAI), Cohere, Gemini, and Mistral. Swap providers without losing cached data.
 
 -   :material-rocket-launch:{ .lg .middle } **Production Ready**
 

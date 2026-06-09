@@ -1,6 +1,44 @@
 # Batch Operations
 
-Medha provides several methods for efficiently loading large numbers of entries into the cache without calling `store()` in a loop.
+Medha provides batch methods for both **ingestion** (loading many entries at once) and **lookup** (searching for many questions in a single call).
+
+---
+
+## `search_batch` — Look Up Multiple Questions at Once
+
+`search_batch()` embeds all questions in a single `aembed_batch()` round-trip, then runs the waterfall search for each question concurrently via `asyncio.gather()`. This is significantly faster than calling `search()` in a loop when you have many questions.
+
+```python
+async with Medha("demo", embedder=embedder, settings=settings) as cache:
+    questions = [
+        "How many active users?",
+        "Total revenue this month",
+        "List all products",
+    ]
+    results = await cache.search_batch(questions)
+
+    for q, r in zip(questions, results):
+        if r.strategy.value != "no_match":
+            print(f"{q!r} → {r.generated_query} (strategy={r.strategy.value}, score={r.score:.3f})")
+        else:
+            print(f"{q!r} → cache miss")
+```
+
+Results are returned in the **same order** as the input questions. Each result is a `CacheResult` identical to what `search()` would return for that question individually.
+
+**Sync wrapper:**
+
+```python
+results = cache.search_batch_sync(questions)
+```
+
+!!! tip "When to use `search_batch` vs `search`"
+
+    Use `search_batch()` whenever you need to look up more than one question per request — for example, when warming a test harness, running a benchmark, or processing a batch of user queries in one pass. The primary saving is the embedding step: one `aembed_batch()` call instead of N individual `aembed()` calls.
+
+---
+
+Medha also provides several methods for efficiently loading large numbers of entries into the cache without calling `store()` in a loop.
 
 ---
 

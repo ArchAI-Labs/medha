@@ -113,8 +113,23 @@ Medha is configured through the `Settings` class, which is backed by Pydantic Se
     | `default_ttl_seconds` | `int \| None` | `None` | Global TTL for new entries; `None` means no expiry |
     | `cleanup_interval_seconds` | `int` | `300` | How often (seconds) the background cleanup task runs |
     | `enable_background_cleanup` | `bool` | `True` | Enable periodic sweep of expired entries |
+    | `validate_on_start` | `bool` | `True` | When `True`, `start()` probes the backend with `count()` before returning, surfacing connectivity issues early. Set to `False` to skip (e.g. in unit tests). |
 
-    **Environment variable prefix:** `MEDHA_DEFAULT_TTL_SECONDS`, `MEDHA_CLEANUP_*`, `MEDHA_ENABLE_BACKGROUND_CLEANUP`
+    **Environment variable prefix:** `MEDHA_DEFAULT_TTL_SECONDS`, `MEDHA_CLEANUP_*`, `MEDHA_ENABLE_BACKGROUND_CLEANUP`, `MEDHA_VALIDATE_ON_START`
+
+??? info "Embedder Selection"
+
+    | Field | Type | Default | Description |
+    |---|---|---|---|
+    | `embedder_type` | `str` | `"_noop"` | Active embedder: `fastembed`, `openai`, `openai-compatible`, `cohere`, `gemini`, `mistral` |
+    | `oai_compat_base_url` | `str` | `"http://localhost:11434/v1"` | Endpoint for `openai-compatible` adapter (Ollama, vLLM, LocalAI, LM Studio) |
+    | `oai_compat_model` | `str` | `"nomic-embed-text"` | Model name for `openai-compatible` adapter |
+    | `oai_compat_api_key` | `SecretStr \| None` | `None` | API key for the `openai-compatible` endpoint (optional) |
+    | `mistral_api_key` | `SecretStr \| None` | `None` | Mistral API key |
+    | `mistral_model` | `str` | `"mistral-embed"` | Mistral embedding model identifier |
+    | `mistral_batch_size` | `int` | `50` | Max texts per Mistral API request (1–512) |
+
+    **Environment variable prefix:** `MEDHA_EMBEDDER_TYPE`, `MEDHA_OAI_COMPAT_*`, `MEDHA_MISTRAL_*`
 
 ??? info "Batch Operations"
 

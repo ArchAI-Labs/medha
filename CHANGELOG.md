@@ -5,6 +5,71 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.3] — 2026-06-09
+
+### Added
+
+- **Async context manager**: `Medha` now implements `__aenter__` / `__aexit__`.
+  Use `async with Medha(...) as m:` instead of calling `start()` and `close()`
+  manually. `close()` is guaranteed to run even if an exception occurs.
+
+- **`Medha.search_batch(questions)`** — look up a list of questions in a single
+  call. All questions are embedded via one `aembed_batch()` round-trip; waterfall
+  searches run concurrently via `asyncio.gather()`. Returns results in input order.
+  Sync wrapper: `search_batch_sync()`.
+
+- **Startup validation**: `start()` now calls `count()` on the collection after
+  `initialize()` to verify backend connectivity. Raises `StorageError` if the probe
+  fails. Disable with `Settings(validate_on_start=False)` (or env var
+  `MEDHA_VALIDATE_ON_START=false`).
+
+- `Settings.validate_on_start` (default `True`) — toggle backend probe in `start()`.
+
+## [0.4.2] — 2026-06-09
+
+### Added
+
+- **`OpenAICompatibleAdapter`**: embedder adapter for any OpenAI-compatible
+  endpoint (Ollama, vLLM, LocalAI, LM Studio). Reuses the `[openai]` extra.
+  Select with `MEDHA_EMBEDDER_TYPE=openai-compatible`;
+  configure endpoint via `MEDHA_OAI_COMPAT_BASE_URL` (default:
+  `http://localhost:11434/v1`) and `MEDHA_OAI_COMPAT_MODEL` (default:
+  `nomic-embed-text`).
+
+- **`MistralAdapter`**: embedder adapter for the Mistral Embeddings API
+  (`mistral-embed`, 1024 dimensions). Install with
+  `pip install "medha-archai[mistral]"`. Select with
+  `MEDHA_EMBEDDER_TYPE=mistral`; configure with `MEDHA_MISTRAL_API_KEY`.
+
+- `Settings.oai_compat_base_url`, `Settings.oai_compat_model`,
+  `Settings.oai_compat_api_key` — configuration for `OpenAICompatibleAdapter`.
+
+- `Settings.mistral_api_key`, `Settings.mistral_model`,
+  `Settings.mistral_batch_size` — configuration for `MistralAdapter`.
+
+- `embedder_type` now accepts `"openai-compatible"` and `"mistral"` in addition
+  to the existing values.
+
+## [0.4.1] — 2026-06-08
+
+### Fixed
+
+- `__version__` in `src/medha/__init__.py` corrected to `"0.4.0"` (was `"0.3.1"`
+  due to a missed bump at release time).
+
+### Added
+
+- `medha search <question>` CLI command — look up a question in the cache and
+  print the best match (strategy, score, generated query). Requires a real embedder
+  (`MEDHA_EMBEDDER_TYPE != _noop`). Supports `--json` for machine-readable output.
+
+- `medha health` CLI command — probe backend connectivity and embedder availability.
+  Prints `OK` / `ERROR` / `SKIPPED` per component. Exits with code 1 if any probe
+  fails. Supports `--json`.
+
+- `--json` flag on `medha stats` — outputs collection name, backend type, and entry
+  count as a JSON object.
+
 ## [0.4.0] — 2026-05-19
 
 ### Breaking Changes

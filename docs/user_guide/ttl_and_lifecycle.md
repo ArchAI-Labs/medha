@@ -103,3 +103,33 @@ gantt
 !!! note
 
     The window between expiry and deletion depends on `cleanup_interval_seconds`. During this window, the entry counts as a miss in search, but storage is still consumed. Reduce the interval if storage efficiency is critical.
+
+---
+
+## Startup Validation
+
+When `validate_on_start=True` (the default), `start()` calls `count()` on the backend after `initialize()` completes. This surfaces connectivity problems — wrong host, misconfigured credentials, network partition — immediately at startup rather than silently failing on the first search.
+
+```python
+from medha import Medha, Settings
+from medha.backends.memory import InMemoryBackend
+from medha.embeddings.fastembed_adapter import FastEmbedAdapter
+
+# Default: probe fires on start()
+async with Medha("demo", FastEmbedAdapter(), InMemoryBackend(), Settings()) as m:
+    ...  # raises StorageError here if backend is unreachable
+```
+
+Disable the probe in unit tests or environments where the backend is intentionally absent:
+
+```python
+settings = Settings(validate_on_start=False)
+```
+
+Or via environment variable:
+
+```bash
+export MEDHA_VALIDATE_ON_START=false
+```
+
+If the probe fails, `StorageError` is raised with a message that includes the phrase `"connectivity check"` so it is easy to distinguish from other storage errors.
