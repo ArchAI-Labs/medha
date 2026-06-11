@@ -7,6 +7,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
+from medha.backends._escape import quote_sql_literal
 from medha.exceptions import ConfigurationError, StorageError, StorageInitializationError
 from medha.interfaces.storage import VectorStorageBackend
 from medha.types import CacheEntry, CacheResult
@@ -42,10 +43,6 @@ _SCALAR_FIELDS = [
 
 def _az_index_name(collection_name: str, prefix: str) -> str:
     return re.sub(r"[^a-z0-9-]", "-", f"{prefix}-{collection_name}".lower()).strip("-")[:128]
-
-
-def _esc(value: str) -> str:
-    return value.replace("'", "''")
 
 
 def _dt_to_iso(dt: datetime | None) -> str | None:
@@ -317,7 +314,7 @@ class AzureSearchBackend(VectorStorageBackend):
         self, collection_name: str, query_hash: str
     ) -> CacheResult | None:
         client = self._get_client(collection_name)
-        filter_expr = f"query_hash eq '{_esc(query_hash)}'"
+        filter_expr = f"query_hash eq '{quote_sql_literal(query_hash)}'"
         try:
             async for result in await client.search(
                 search_text=None,
@@ -403,7 +400,7 @@ class AzureSearchBackend(VectorStorageBackend):
         self, collection_name: str, normalized_question: str
     ) -> CacheResult | None:
         client = self._get_client(collection_name)
-        filter_expr = f"normalized_question eq '{_esc(normalized_question)}'"
+        filter_expr = f"normalized_question eq '{quote_sql_literal(normalized_question)}'"
         try:
             async for result in await client.search(
                 search_text=None,
@@ -422,7 +419,7 @@ class AzureSearchBackend(VectorStorageBackend):
         self, collection_name: str, query_hash: str
     ) -> list[str]:
         client = self._get_client(collection_name)
-        filter_expr = f"query_hash eq '{_esc(query_hash)}'"
+        filter_expr = f"query_hash eq '{quote_sql_literal(query_hash)}'"
         try:
             ids: list[str] = []
             async for result in await client.search(
@@ -442,7 +439,7 @@ class AzureSearchBackend(VectorStorageBackend):
         self, collection_name: str, template_id: str
     ) -> list[str]:
         client = self._get_client(collection_name)
-        filter_expr = f"template_id eq '{_esc(template_id)}'"
+        filter_expr = f"template_id eq '{quote_sql_literal(template_id)}'"
         try:
             ids: list[str] = []
             async for result in await client.search(

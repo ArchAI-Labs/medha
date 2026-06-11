@@ -4,6 +4,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from medha.backends._escape import quote_sql_literal
 from medha.exceptions import ConfigurationError, StorageError, StorageInitializationError
 from medha.interfaces.storage import VectorStorageBackend
 from medha.types import CacheEntry, CacheResult
@@ -150,7 +151,7 @@ class LanceDBBackend(VectorStorageBackend):
 
     async def update_feedback(self, collection_name: str, point_id: str, correct: bool) -> int:
         table = self._get_table(collection_name)
-        safe_id = point_id.replace("'", "''")
+        safe_id = quote_sql_literal(point_id)
         try:
             rows: list[dict[str, Any]] = await (
                 table.query()
@@ -278,7 +279,7 @@ class LanceDBBackend(VectorStorageBackend):
         if not ids:
             return
         table = self._get_table(collection_name)
-        safe_ids = ", ".join(f"'{id_.replace(chr(39), chr(39) * 2)}'" for id_ in ids)
+        safe_ids = ", ".join(f"'{quote_sql_literal(id_)}'" for id_ in ids)
         try:
             await table.delete(f"id IN ({safe_ids})")
         except Exception as e:
@@ -302,7 +303,7 @@ class LanceDBBackend(VectorStorageBackend):
         self, collection_name: str, normalized_question: str
     ) -> CacheResult | None:
         table = self._get_table(collection_name)
-        safe_q = normalized_question.replace("'", "''")
+        safe_q = quote_sql_literal(normalized_question)
         try:
             rows: list[dict[str, Any]] = await (
                 table.query()
@@ -318,7 +319,7 @@ class LanceDBBackend(VectorStorageBackend):
 
     async def find_by_query_hash(self, collection_name: str, query_hash: str) -> list[str]:
         table = self._get_table(collection_name)
-        safe_hash = query_hash.replace("'", "''")
+        safe_hash = quote_sql_literal(query_hash)
         try:
             rows: list[dict[str, Any]] = await (
                 table.query()
@@ -334,7 +335,7 @@ class LanceDBBackend(VectorStorageBackend):
 
     async def find_by_template_id(self, collection_name: str, template_id: str) -> list[str]:
         table = self._get_table(collection_name)
-        safe_tid = template_id.replace("'", "''")
+        safe_tid = quote_sql_literal(template_id)
         try:
             rows: list[dict[str, Any]] = await (
                 table.query()
