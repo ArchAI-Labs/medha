@@ -165,6 +165,63 @@ async def test_initialize_idempotent(vc_backend):
 
 
 # ---------------------------------------------------------------------------
+# _validate_vc_lists (vc_lists is interpolated into the vchordrq index DDL)
+# ---------------------------------------------------------------------------
+
+
+def test_validate_vc_lists_accepts_list_of_ints():
+    from medha.backends.vectorchord import _validate_vc_lists
+
+    assert _validate_vc_lists([1000]) == [1000]
+    assert _validate_vc_lists([500, 1000]) == [500, 1000]
+
+
+def test_validate_vc_lists_normalises_tuple_to_list():
+    from medha.backends.vectorchord import _validate_vc_lists
+
+    result = _validate_vc_lists((100, 200))
+    assert result == [100, 200]
+    assert isinstance(result, list)
+
+
+def test_validate_vc_lists_allows_empty():
+    # vchordrq accepts an empty lists config — we must not change that behaviour.
+    from medha.backends.vectorchord import _validate_vc_lists
+
+    assert _validate_vc_lists([]) == []
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "'); DROP TABLE x; --",  # SQL-injection-style string (the original concern)
+        ["a", "b"],              # non-int elements
+        [1000, "2000"],          # mixed
+        [True, False],           # bool is an int subclass but not a valid count
+        [1.5],                   # float
+        None,                    # not a sequence
+        {"lists": 1000},         # mapping
+    ],
+)
+def test_validate_vc_lists_rejects_invalid(bad):
+    from medha.backends.vectorchord import _validate_vc_lists
+    from medha.exceptions import StorageInitializationError
+
+    with pytest.raises(StorageInitializationError):
+        _validate_vc_lists(bad)
+
+
+async def test_initialize_rejects_malicious_vc_lists_kwarg(vc_backend):
+    """A non-int vc_lists passed via kwargs is rejected before any SQL runs."""
+    from medha.exceptions import StorageInitializationError
+
+    b, conn = vc_backend
+    with pytest.raises(StorageInitializationError):
+        await b.initialize(COLL, DIM, vc_lists="'); DROP TABLE x; --")
+    conn.execute.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # upsert
 # ---------------------------------------------------------------------------
 
