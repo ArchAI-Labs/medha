@@ -90,8 +90,10 @@ nav:
       - Templates: user_guide/templates.md
       - TTL & Lifecycle: user_guide/ttl_and_lifecycle.md
       - Invalidation: user_guide/invalidation.md
+      - Feedback Loop: user_guide/feedback.md
       - Batch Operations: user_guide/batch_operations.md
       - Observability: user_guide/observability.md
+      - CLI: user_guide/cli.md
   - API Reference:
       - Medha (Core): api/core.md
       - Settings: api/config.md

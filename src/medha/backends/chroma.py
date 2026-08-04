@@ -8,7 +8,7 @@ from typing import Any, Callable
 
 from medha.exceptions import ConfigurationError, StorageError, StorageInitializationError
 from medha.interfaces.storage import VectorStorageBackend
-from medha.types import CacheEntry, CacheResult
+from medha.types import CacheEntry, CacheResult, PersistedStats
 
 logger = logging.getLogger(__name__)
 
@@ -20,10 +20,23 @@ except ImportError:
 
 _CHROMA_UNSAFE_RE = re.compile(r"[^a-z0-9_-]")
 
+# Fixed id of the single stats document in the sidecar meta collection.
+_STATS_DOC_ID = "_stats"
+
 
 def _chroma_collection_name(name: str) -> str:
     safe = _CHROMA_UNSAFE_RE.sub("_", name.lower())
     return safe[:63]
+
+
+def _chroma_meta_collection_name(name: str) -> str:
+    """Sidecar collection holding the stats document for *name*.
+
+    The suffix is appended to the already-sanitised name and the base is
+    trimmed first, so the result stays inside Chroma's 63-character limit
+    without the suffix ever being truncated away.
+    """
+    return f"{_chroma_collection_name(name)[:57]}__meta"
 
 
 def _now_iso() -> str:
@@ -90,6 +103,7 @@ class ChromaBackend(VectorStorageBackend):
         self._client: Any = None
         self._is_async: bool = False
         self._collections: dict[str, Any] = {}
+        self._meta_collections: dict[str, Any] = {}
 
     async def _run(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         if self._is_async:
@@ -367,6 +381,64 @@ class ChromaBackend(VectorStorageBackend):
                 f"Chroma drop_collection failed on '{collection_name}': {e}"
             ) from e
 
+    async def _get_meta_collection(self, collection_name: str) -> Any:
+        """Return (creating if needed) the sidecar collection holding the stats."""
+        if self._client is None:
+            raise StorageError("Not connected. Call connect() first.")
+        cached = self._meta_collections.get(collection_name)
+        if cached is not None:
+            return cached
+        meta_name = _chroma_meta_collection_name(collection_name)
+        collection = await self._run(
+            self._client.get_or_create_collection, name=meta_name
+        )
+        self._meta_collections[collection_name] = collection
+        return collection
+
+    async def load_stats(self, collection_name: str) -> PersistedStats | None:
+        try:
+            collection = await self._get_meta_collection(collection_name)
+            result = await self._run(
+                collection.get, ids=[_STATS_DOC_ID], include=["metadatas"]
+            )
+        except StorageError:
+            raise
+        except Exception as e:
+            raise StorageError(
+                f"Chroma load_stats failed on '{collection_name}': {e}"
+            ) from e
+
+        metadatas: list[dict[str, Any]] = result.get("metadatas") or []
+        if not result.get("ids") or not metadatas:
+            return None
+        raw = (metadatas[0] or {}).get("stats_json")
+        if not raw:
+            return None
+        try:
+            return PersistedStats.model_validate_json(raw)
+        except Exception as e:
+            raise StorageError(
+                f"Chroma load_stats failed to parse stats for '{collection_name}': {e}"
+            ) from e
+
+    async def save_stats(self, collection_name: str, stats: PersistedStats) -> None:
+        try:
+            collection = await self._get_meta_collection(collection_name)
+            # Chroma requires an embedding on write; the sidecar is only ever
+            # read by id, so a 1-dimensional placeholder is enough.
+            await self._run(
+                collection.upsert,
+                ids=[_STATS_DOC_ID],
+                embeddings=[[0.0]],
+                metadatas=[{"stats_json": stats.model_dump_json()}],
+            )
+        except StorageError:
+            raise
+        except Exception as e:
+            raise StorageError(
+                f"Chroma save_stats failed on '{collection_name}': {e}"
+            ) from e
+
     async def close(self) -> None:
         if self._is_async and self._client is not None:
             try:
@@ -375,3 +447,4 @@ class ChromaBackend(VectorStorageBackend):
                 pass
         self._client = None
         self._collections.clear()
+        self._meta_collections.clear()

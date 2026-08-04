@@ -8,7 +8,7 @@ from typing import Any
 
 from medha.exceptions import StorageError
 from medha.interfaces.storage import VectorStorageBackend
-from medha.types import CacheEntry, CacheResult
+from medha.types import CacheEntry, CacheResult, PersistedStats
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +39,8 @@ class InMemoryBackend(VectorStorageBackend):
     def __init__(self) -> None:
         # _store: collection_name -> {"dimension": int, "entries": {id: stored_point}}
         self._store: dict[str, dict[str, Any]] = {}
+        # _meta_store: collection_name -> PersistedStats (no serialization needed)
+        self._meta_store: dict[str, PersistedStats] = {}
         self._lock = asyncio.Lock()
 
     async def connect(self) -> None:
@@ -238,6 +240,21 @@ class InMemoryBackend(VectorStorageBackend):
                 new_value = payload.get("feedback_incorrect", 0) + 1
                 payload["feedback_incorrect"] = new_value
             return new_value
+
+    async def load_stats(self, collection_name: str) -> PersistedStats | None:
+        """Return the stats snapshot for the collection, or None if never saved.
+
+        Stats live in-process only: they do not survive a restart. The methods
+        exist for contract compliance and testing — persistence across runs is
+        meaningful for disk/network backends.
+        """
+        async with self._lock:
+            return self._meta_store.get(collection_name)
+
+    async def save_stats(self, collection_name: str, stats: PersistedStats) -> None:
+        """Store the stats snapshot for the collection, replacing any previous one."""
+        async with self._lock:
+            self._meta_store[collection_name] = stats
 
 
 def _parse_dt(value: str) -> datetime | None:

@@ -5,7 +5,17 @@ import uuid
 from typing import Any
 
 from medha.exceptions import StorageError
-from medha.types import CacheResult
+from medha.types import CacheResult, PersistedStats
+
+# Fixed literal, never derived from user input. The only identifier
+# interpolated into the stats SQL is the schema, which Settings validates
+# against _SAFE_IDENTIFIER_RE; collection_name and stats_json always travel as
+# bind parameters ($1/$2).
+_STATS_TABLE = "_medha_stats"
+
+# PostgreSQL SQLSTATE 42P01 (undefined_table): the stats table has never been
+# created, so no stats were ever saved -> load_stats returns None.
+_UNDEFINED_TABLE = "42P01"
 
 
 def _row_to_cache_result(row: Any, score: float | None = None) -> CacheResult:
@@ -30,10 +40,74 @@ class _AsyncpgBackendMixin:
 
     _pool: Any
     _initialized_tables: set[str]
+    _settings: Any
 
     def _table_name(self, collection_name: str) -> str:
         safe = re.sub(r"[^a-zA-Z0-9_]", "_", collection_name)
         return f"{self._settings.pg_table_prefix}_{safe}"
+
+    def _stats_table_ddl(self) -> str:
+        """DDL for the shared stats table, executed from ``initialize()``.
+
+        One row per collection, keyed by ``collection_name``. Kept out of the
+        vector tables so a ``DROP TABLE`` of a collection cannot take the
+        metadata of the others with it.
+        """
+        return f"""
+            CREATE TABLE IF NOT EXISTS {self._settings.pg_schema}.{_STATS_TABLE} (
+                collection_name TEXT PRIMARY KEY,
+                stats_json      TEXT NOT NULL,
+                updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """
+
+    async def load_stats(self, collection_name: str) -> PersistedStats | None:
+        if self._pool is None:
+            raise StorageError("Not connected. Call connect() first.")
+
+        schema = self._settings.pg_schema
+        sql = (
+            f"SELECT stats_json FROM {schema}.{_STATS_TABLE}"
+            f" WHERE collection_name = $1"
+        )
+        try:
+            async with self._pool.acquire() as conn:
+                row = await conn.fetchrow(sql, collection_name)
+        except Exception as e:
+            if getattr(e, "sqlstate", None) == _UNDEFINED_TABLE:
+                return None
+            raise StorageError(
+                f"asyncpg load_stats failed on '{collection_name}': {e}"
+            ) from e
+
+        if row is None or row["stats_json"] is None:
+            return None
+        try:
+            return PersistedStats.model_validate_json(row["stats_json"])
+        except Exception as e:
+            raise StorageError(
+                f"asyncpg load_stats failed to parse stats for '{collection_name}': {e}"
+            ) from e
+
+    async def save_stats(self, collection_name: str, stats: PersistedStats) -> None:
+        if self._pool is None:
+            raise StorageError("Not connected. Call connect() first.")
+
+        schema = self._settings.pg_schema
+        sql = f"""
+            INSERT INTO {schema}.{_STATS_TABLE} (collection_name, stats_json)
+            VALUES ($1, $2)
+            ON CONFLICT (collection_name) DO UPDATE
+                SET stats_json = $2,
+                    updated_at = now()
+        """
+        try:
+            async with self._pool.acquire() as conn:
+                await conn.execute(sql, collection_name, stats.model_dump_json())
+        except Exception as e:
+            raise StorageError(
+                f"asyncpg save_stats failed on '{collection_name}': {e}"
+            ) from e
 
     async def scroll(
         self,

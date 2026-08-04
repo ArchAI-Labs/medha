@@ -1,6 +1,6 @@
 """Medha - Semantic Memory for AI Text-to-Query systems."""
 
-__version__ = "0.4.3"
+__version__ = "0.5.0"
 
 from medha.backends.memory import InMemoryBackend
 from medha.config import Settings
@@ -11,7 +11,16 @@ from medha.interfaces.storage import VectorStorageBackend
 from medha.l1_cache.memory import InMemoryL1Cache
 from medha.l1_cache.redis_adapter import RedisL1Cache
 from medha.logging import setup_logging
-from medha.types import CacheEntry, CacheHit, CacheResult, CacheStats, QueryTemplate, SearchStrategy, StrategyStats
+from medha.types import (
+    CacheEntry,
+    CacheHit,
+    CacheResult,
+    CacheStats,
+    PersistedStats,
+    QueryTemplate,
+    SearchStrategy,
+    StrategyStats,
+)
 
 _optional: list[str] = []
 
@@ -95,7 +104,7 @@ except ImportError:
 
 __all__ = [
     "Medha", "Settings", "CacheHit", "QueryTemplate", "CacheEntry",
-    "CacheResult", "CacheStats", "StrategyStats", "SearchStrategy",
+    "CacheResult", "CacheStats", "PersistedStats", "StrategyStats", "SearchStrategy",
     "BaseEmbedder", "L1CacheBackend", "VectorStorageBackend",
     "InMemoryL1Cache", "RedisL1Cache", "setup_logging", "InMemoryBackend",
 ] + _optional

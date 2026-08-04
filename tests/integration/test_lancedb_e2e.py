@@ -16,7 +16,6 @@ from medha.config import Settings
 from medha.core import Medha
 from medha.types import SearchStrategy
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -152,6 +151,109 @@ class TestBackendCRUD:
 # ---------------------------------------------------------------------------
 # Medha pipeline tests
 # ---------------------------------------------------------------------------
+
+
+class TestStatsPersistence:
+    """Real round-trips against an on-disk LanceDB meta table."""
+
+    async def test_load_stats_returns_none_when_never_saved(self, lancedb_backend):
+        await lancedb_backend.initialize("test_col", 8)
+
+        assert await lancedb_backend.load_stats("test_col") is None
+
+    async def test_save_then_load_round_trip(self, lancedb_backend):
+        from medha.types import PersistedStats
+
+        await lancedb_backend.initialize("test_col", 8)
+        stats = PersistedStats(
+            total_requests=20,
+            total_hits=15,
+            total_misses=4,
+            total_errors=1,
+            hits_by_strategy={"exact": 9, "semantic": 6},
+        )
+
+        await lancedb_backend.save_stats("test_col", stats)
+        loaded = await lancedb_backend.load_stats("test_col")
+
+        assert loaded is not None
+        assert loaded.total_requests == 20
+        assert loaded.total_hits == 15
+        assert loaded.total_errors == 1
+        assert loaded.hits_by_strategy == {"exact": 9, "semantic": 6}
+
+    async def test_save_stats_overwrites_previous_snapshot(self, lancedb_backend):
+        from medha.types import PersistedStats
+
+        await lancedb_backend.initialize("test_col", 8)
+        await lancedb_backend.save_stats("test_col", PersistedStats(total_requests=1))
+        await lancedb_backend.save_stats("test_col", PersistedStats(total_requests=42))
+
+        loaded = await lancedb_backend.load_stats("test_col")
+
+        assert loaded is not None
+        assert loaded.total_requests == 42
+
+    async def test_stats_are_isolated_per_collection(self, lancedb_backend):
+        from medha.types import PersistedStats
+
+        await lancedb_backend.initialize("col_a", 8)
+        await lancedb_backend.initialize("col_b", 8)
+
+        await lancedb_backend.save_stats("col_a", PersistedStats(total_requests=3))
+        await lancedb_backend.save_stats("col_b", PersistedStats(total_requests=7))
+
+        loaded_a = await lancedb_backend.load_stats("col_a")
+        loaded_b = await lancedb_backend.load_stats("col_b")
+        assert loaded_a is not None and loaded_a.total_requests == 3
+        assert loaded_b is not None and loaded_b.total_requests == 7
+
+    async def test_stats_do_not_pollute_the_data_table(self, lancedb_backend):
+        from medha.types import PersistedStats
+        from tests.conftest import make_entry
+
+        await lancedb_backend.initialize("test_col", 8)
+        await lancedb_backend.upsert("test_col", [make_entry()])
+
+        await lancedb_backend.save_stats("test_col", PersistedStats(total_requests=5))
+
+        assert await lancedb_backend.count("test_col") == 1
+
+    async def test_stats_survive_a_reconnect(self, tmp_path):
+        from medha.backends.lancedb import LanceDBBackend
+        from medha.types import PersistedStats
+
+        settings = Settings(
+            backend_type="lancedb",
+            lancedb_uri=str(tmp_path / "lancedb_stats"),
+        )
+
+        b = LanceDBBackend(settings)
+        await b.connect()
+        await b.initialize("test_col", 8)
+        await b.save_stats("test_col", PersistedStats(total_requests=17))
+        await b.close()
+
+        b2 = LanceDBBackend(settings)
+        await b2.connect()
+        try:
+            loaded = await b2.load_stats("test_col")
+            assert loaded is not None
+            assert loaded.total_requests == 17
+        finally:
+            await b2.close()
+
+    async def test_quotes_in_collection_name_are_escaped(self, lancedb_backend):
+        from medha.types import PersistedStats
+
+        weird = "bad' OR '1'='1"
+        await lancedb_backend.save_stats(weird, PersistedStats(total_requests=2))
+
+        loaded = await lancedb_backend.load_stats(weird)
+        assert loaded is not None
+        assert loaded.total_requests == 2
+        # The injected predicate did not match a different row
+        assert await lancedb_backend.load_stats("something_else") is None
 
 
 class TestStoreAndSearch:

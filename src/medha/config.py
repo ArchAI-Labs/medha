@@ -365,6 +365,19 @@ class Settings(BaseSettings):
             "None disables auto-invalidation. Env var: MEDHA_FEEDBACK_INCORRECT_THRESHOLD."
         ),
     )
+    feedback_boost_factor: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "When > 0, the similarity score of a cached result is multiplied by "
+            "(1 + feedback_boost_factor * trust), where trust = feedback_correct / "
+            "(feedback_correct + feedback_incorrect). "
+            "A trust of 1.0 (all positive feedback) boosts the score by feedback_boost_factor. "
+            "Default 0.0 disables boosting (backward compatible). "
+            "Env var: MEDHA_FEEDBACK_BOOST_FACTOR."
+        ),
+    )
 
     # --- Batch operations ---
     batch_size: int = Field(default=100, ge=1, le=10000, description="Batch size for bulk upsert")
@@ -382,6 +395,16 @@ class Settings(BaseSettings):
         description=(
             "Maximum number of per-request latency samples retained for percentile calculation. "
             "Older samples are evicted when the buffer is full (FIFO)."
+        ),
+    )
+    stats_persist_interval: int = Field(
+        default=100,
+        ge=1,
+        description=(
+            "Persist CacheStats to the backend after every N requests. "
+            "Set to 1 to persist on every request (accurate but slower). "
+            "Set to a large number to reduce write frequency. "
+            "Env var: MEDHA_STATS_PERSIST_INTERVAL."
         ),
     )
 

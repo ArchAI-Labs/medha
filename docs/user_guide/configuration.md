@@ -114,8 +114,10 @@ Medha is configured through the `Settings` class, which is backed by Pydantic Se
     | `cleanup_interval_seconds` | `int` | `300` | How often (seconds) the background cleanup task runs |
     | `enable_background_cleanup` | `bool` | `True` | Enable periodic sweep of expired entries |
     | `validate_on_start` | `bool` | `True` | When `True`, `start()` probes the backend with `count()` before returning, surfacing connectivity issues early. Set to `False` to skip (e.g. in unit tests). |
+    | `feedback_incorrect_threshold` | `int \| None` | `None` | Auto-invalidate an entry once it accumulates this many `correct=False` reports; `None` disables it. See [Feedback Loop](feedback.md#auto-invalidation). |
+    | `feedback_boost_factor` | `float` | `0.0` | When `> 0`, raises a candidate's similarity score in proportion to its positive-feedback trust. `0.0` disables boosting. See [Feedback Loop](feedback.md#score-boosting). |
 
-    **Environment variable prefix:** `MEDHA_DEFAULT_TTL_SECONDS`, `MEDHA_CLEANUP_*`, `MEDHA_ENABLE_BACKGROUND_CLEANUP`, `MEDHA_VALIDATE_ON_START`
+    **Environment variable prefix:** `MEDHA_DEFAULT_TTL_SECONDS`, `MEDHA_CLEANUP_*`, `MEDHA_ENABLE_BACKGROUND_CLEANUP`, `MEDHA_VALIDATE_ON_START`, `MEDHA_FEEDBACK_*`
 
 ??? info "Embedder Selection"
 
@@ -145,10 +147,11 @@ Medha is configured through the `Settings` class, which is backed by Pydantic Se
     | Field | Type | Default | Description |
     |---|---|---|---|
     | `collect_stats` | `bool` | `True` | Enable hit/miss counters and per-strategy tracking |
+    | `stats_persist_interval` | `int` | `100` | Persist a `PersistedStats` snapshot to the backend every N requests, so metrics survive restarts. See [Observability](observability.md#persistent-statistics). |
     | `log_level` | `str` | `"WARNING"` | Python logging level for the `medha` logger |
     | `log_format` | `str` | `"text"` | Log format: `"text"` or `"json"` |
 
-    **Environment variable prefix:** `MEDHA_COLLECT_STATS`, `MEDHA_LOG_*`
+    **Environment variable prefix:** `MEDHA_COLLECT_STATS`, `MEDHA_STATS_PERSIST_INTERVAL`, `MEDHA_LOG_*`
 
 ??? info "Security & File I/O"
 

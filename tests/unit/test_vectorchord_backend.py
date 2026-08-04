@@ -44,6 +44,14 @@ def _make_pg_error(msg: str = "simulated postgres error") -> asyncpg.PostgresErr
     return err
 
 
+def _make_undefined_table_error() -> asyncpg.PostgresError:
+    """An error carrying SQLSTATE 42P01 (undefined_table)."""
+    cls = asyncpg.exceptions.UndefinedTableError
+    err = cls.__new__(cls)
+    Exception.__init__(err, "relation does not exist")
+    return err
+
+
 def _vc_settings(**overrides) -> Settings:
     return Settings(backend_type="vectorchord", **overrides)
 
@@ -600,3 +608,120 @@ async def test_search_by_normalized_question_not_found(vc_backend):
     result = await b.search_by_normalized_question(COLL, "nothing here")
 
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# load_stats / save_stats (from _AsyncpgBackendMixin)
+# ---------------------------------------------------------------------------
+
+
+async def test_initialize_creates_stats_table(vc_backend):
+    """initialize() provisions the shared _medha_stats table."""
+    b, conn = vc_backend
+    await b.initialize(COLL, DIM)
+
+    stats_ddl = [
+        c for c in conn.execute.call_args_list
+        if "_medha_stats" in str(c.args[0])
+    ]
+    assert len(stats_ddl) == 1
+    sql = stats_ddl[0].args[0]
+    assert "CREATE TABLE IF NOT EXISTS" in sql
+    assert "public._medha_stats" in sql
+
+
+async def test_initialize_validates_vc_lists_before_stats_ddl(vc_backend):
+    """The vc_lists guard still runs first — no SQL escapes a bad kwarg."""
+    from medha.exceptions import StorageInitializationError
+
+    b, conn = vc_backend
+    with pytest.raises(StorageInitializationError):
+        await b.initialize(COLL, DIM, vc_lists="'); DROP TABLE x; --")
+    conn.execute.assert_not_called()
+
+
+async def test_save_stats_upserts_with_bind_params(vc_backend):
+    from medha.types import PersistedStats
+
+    b, conn = vc_backend
+    await b.initialize(COLL, DIM)
+    conn.execute.reset_mock()
+
+    await b.save_stats(COLL, PersistedStats(total_requests=9, total_misses=4))
+
+    conn.execute.assert_awaited_once()
+    sql, collection, payload = conn.execute.call_args.args
+    assert "INSERT INTO public._medha_stats" in sql
+    assert "ON CONFLICT (collection_name) DO UPDATE" in sql
+    assert collection == COLL
+    assert PersistedStats.model_validate_json(payload).total_misses == 4
+
+
+async def test_load_stats_returns_parsed_snapshot(vc_backend):
+    from medha.types import PersistedStats
+
+    b, conn = vc_backend
+    await b.initialize(COLL, DIM)
+    stats = PersistedStats(total_requests=5, total_errors=1)
+    conn.fetchrow.return_value = {"stats_json": stats.model_dump_json()}
+
+    loaded = await b.load_stats(COLL)
+
+    assert loaded is not None
+    assert loaded.total_requests == 5
+    assert loaded.total_errors == 1
+    sql, bound = conn.fetchrow.call_args.args
+    assert bound == COLL
+    assert COLL not in sql
+
+
+async def test_load_stats_returns_none_when_absent(vc_backend):
+    b, conn = vc_backend
+    await b.initialize(COLL, DIM)
+    conn.fetchrow.return_value = None
+
+    assert await b.load_stats(COLL) is None
+
+
+async def test_load_stats_returns_none_when_table_missing(vc_backend):
+    b, conn = vc_backend
+    await b.initialize(COLL, DIM)
+    conn.fetchrow.side_effect = _make_undefined_table_error()
+
+    assert await b.load_stats(COLL) is None
+
+
+async def test_load_stats_wraps_other_errors(vc_backend):
+    b, conn = vc_backend
+    await b.initialize(COLL, DIM)
+    conn.fetchrow.side_effect = _make_pg_error("connection reset")
+
+    with pytest.raises(StorageError, match="load_stats failed"):
+        await b.load_stats(COLL)
+
+
+async def test_save_stats_wraps_errors(vc_backend):
+    from medha.types import PersistedStats
+
+    b, conn = vc_backend
+    await b.initialize(COLL, DIM)
+    conn.execute.side_effect = _make_pg_error("disk full")
+
+    with pytest.raises(StorageError, match="save_stats failed"):
+        await b.save_stats(COLL, PersistedStats())
+
+
+async def test_stats_methods_require_connection():
+    from medha.backends.vectorchord import VectorChordBackend
+    from medha.types import PersistedStats
+
+    b = VectorChordBackend.__new__(VectorChordBackend)
+    b._pool = None
+    b._initialized_tables = set()
+    b._settings = _vc_settings()
+
+    with pytest.raises(StorageError, match="connect()"):
+        await b.load_stats(COLL)
+
+    with pytest.raises(StorageError, match="connect()"):
+        await b.save_stats(COLL, PersistedStats())

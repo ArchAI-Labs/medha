@@ -8,9 +8,12 @@ from typing import Any
 
 from medha.exceptions import ConfigurationError, StorageError, StorageInitializationError
 from medha.interfaces.storage import VectorStorageBackend
-from medha.types import CacheEntry, CacheResult
+from medha.types import CacheEntry, CacheResult, PersistedStats
 
 logger = logging.getLogger(__name__)
+
+# Fixed document id of the single stats document in the sidecar meta index.
+_STATS_DOC_ID = "_stats"
 
 try:
     from elasticsearch import AsyncElasticsearch, NotFoundError, TransportError
@@ -39,6 +42,14 @@ class ElasticsearchBackend(VectorStorageBackend):
         safe = _INDEX_UNSAFE_RE.sub("_", collection_name.lower())
         prefix = self._settings.es_index_prefix
         return f"{prefix}_{safe}"[:255]
+
+    def _meta_index_name(self, collection_name: str) -> str:
+        """Sidecar index holding the stats document for *collection_name*.
+
+        Derived from the already-sanitised data index name, leaving room for
+        the suffix inside Elasticsearch's 255-byte index-name limit.
+        """
+        return f"{self._index_name(collection_name)[:249]}__meta"
 
     async def connect(self) -> None:
         kwargs: dict[str, Any] = {
@@ -412,6 +423,46 @@ class ElasticsearchBackend(VectorStorageBackend):
             logger.info("Dropped Elasticsearch index '%s'", index)
         except TransportError as e:
             raise StorageError(f"Elasticsearch drop_collection failed on '{collection_name}': {e}") from e
+
+    async def load_stats(self, collection_name: str) -> PersistedStats | None:
+        if self._client is None:
+            raise StorageError("Not connected. Call connect() first.")
+        meta_index = self._meta_index_name(collection_name)
+        try:
+            resp = await self._client.get(index=meta_index, id=_STATS_DOC_ID)
+        except NotFoundError:
+            # Neither the index nor the document exists yet — never saved.
+            return None
+        except TransportError as e:
+            raise StorageError(
+                f"Elasticsearch load_stats failed on '{collection_name}': {e}"
+            ) from e
+
+        raw = (resp.get("_source") or {}).get("stats_json")
+        if not raw:
+            return None
+        try:
+            return PersistedStats.model_validate_json(raw)
+        except Exception as e:
+            raise StorageError(
+                f"Elasticsearch load_stats failed to parse stats for '{collection_name}': {e}"
+            ) from e
+
+    async def save_stats(self, collection_name: str, stats: PersistedStats) -> None:
+        if self._client is None:
+            raise StorageError("Not connected. Call connect() first.")
+        meta_index = self._meta_index_name(collection_name)
+        try:
+            await self._client.index(
+                index=meta_index,
+                id=_STATS_DOC_ID,
+                document={"stats_json": stats.model_dump_json()},
+                refresh=True,
+            )
+        except TransportError as e:
+            raise StorageError(
+                f"Elasticsearch save_stats failed on '{collection_name}': {e}"
+            ) from e
 
     async def close(self) -> None:
         if self._client is not None:

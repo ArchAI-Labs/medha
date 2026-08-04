@@ -3,11 +3,11 @@
 import logging
 from datetime import datetime, timezone
 from typing import Any
-from uuid import UUID
+from uuid import NAMESPACE_DNS, UUID, uuid5
 
 from medha.exceptions import ConfigurationError, StorageError, StorageInitializationError
 from medha.interfaces.storage import VectorStorageBackend
-from medha.types import CacheEntry, CacheResult
+from medha.types import CacheEntry, CacheResult, PersistedStats
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +24,20 @@ except ImportError:
 def _wv_collection_name(prefix: str, collection_name: str) -> str:
     pascal = "".join(word.capitalize() for word in collection_name.split("_"))
     return f"{prefix}{pascal}"
+
+
+def _wv_meta_collection_name(prefix: str, collection_name: str) -> str:
+    """Sidecar class holding the stats object for *collection_name*."""
+    return f"{_wv_collection_name(prefix, collection_name)}Meta"
+
+
+def _wv_meta_id(collection_name: str) -> str:
+    """Deterministic UUID of the single stats object in the sidecar class.
+
+    uuid5 keeps the id inside Weaviate's required UUID format whatever the
+    collection is called, so the name is never interpolated into a filter.
+    """
+    return str(uuid5(NAMESPACE_DNS, collection_name))
 
 
 def _now_utc() -> datetime:
@@ -368,6 +382,79 @@ class WeaviateBackend(VectorStorageBackend):
         except Exception as e:
             raise StorageError(
                 f"Weaviate drop_collection failed on '{collection_name}': {e}"
+            ) from e
+
+    async def _ensure_meta_collection(self, collection_name: str) -> Any:
+        """Return (creating if needed) the sidecar class holding the stats."""
+        if self._client is None:
+            raise StorageError("Not connected. Call connect() first.")
+        wv_name = _wv_meta_collection_name(
+            self._settings.weaviate_collection_prefix, collection_name
+        )
+        if not await self._client.collections.exists(wv_name):
+            await self._client.collections.create(
+                name=wv_name,
+                properties=[
+                    wvc.config.Property(
+                        name="statsJson", data_type=wvc.config.DataType.TEXT
+                    ),
+                ],
+                vectorizer_config=wvc.config.Configure.Vectorizer.none(),
+            )
+        return self._client.collections.get(wv_name)
+
+    async def load_stats(self, collection_name: str) -> PersistedStats | None:
+        if self._client is None:
+            raise StorageError("Not connected. Call connect() first.")
+        wv_name = _wv_meta_collection_name(
+            self._settings.weaviate_collection_prefix, collection_name
+        )
+        try:
+            if not await self._client.collections.exists(wv_name):
+                return None
+            collection = self._client.collections.get(wv_name)
+            obj = await collection.query.fetch_object_by_id(_wv_meta_id(collection_name))
+        except StorageError:
+            raise
+        except Exception as e:
+            raise StorageError(
+                f"Weaviate load_stats failed on '{collection_name}': {e}"
+            ) from e
+
+        if obj is None:
+            return None
+        raw = (obj.properties or {}).get("statsJson")
+        if not raw:
+            return None
+        try:
+            return PersistedStats.model_validate_json(raw)
+        except Exception as e:
+            raise StorageError(
+                f"Weaviate load_stats failed to parse stats for '{collection_name}': {e}"
+            ) from e
+
+    async def save_stats(self, collection_name: str, stats: PersistedStats) -> None:
+        try:
+            collection = await self._ensure_meta_collection(collection_name)
+            # insert_many with an explicit UUID overwrites, giving upsert
+            # semantics — the same mechanism upsert() relies on.
+            result = await collection.data.insert_many([
+                DataObject(
+                    uuid=_wv_meta_id(collection_name),
+                    properties={"statsJson": stats.model_dump_json()},
+                    vector=[1.0],
+                )
+            ])
+            if result.has_errors:
+                errors = [str(e) for e in result.errors.values()]
+                raise StorageError(
+                    f"Weaviate save_stats errors on '{collection_name}': {errors}"
+                )
+        except StorageError:
+            raise
+        except Exception as e:
+            raise StorageError(
+                f"Weaviate save_stats failed on '{collection_name}': {e}"
             ) from e
 
     async def close(self) -> None:

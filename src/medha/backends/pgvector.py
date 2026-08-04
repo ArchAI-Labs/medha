@@ -111,6 +111,8 @@ class PgVectorBackend(_AsyncpgBackendMixin, VectorStorageBackend):
                         WHERE expires_at IS NOT NULL
                 """)
 
+                await conn.execute(self._stats_table_ddl())
+
         except asyncpg.PostgresError as e:
             raise StorageInitializationError(
                 f"Failed to initialize collection '{collection_name}': {e}"

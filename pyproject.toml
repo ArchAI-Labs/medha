@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "medha-archai"
-version = "0.4.3"
+version = "0.5.0"
 description = "Semantic Memory for AI Text-to-Query systems"
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -106,6 +106,7 @@ asyncio_mode = "auto"
 addopts = "-v --tb=short"
 markers = [
     "slow: tests that require heavy models or real embedders",
+    "integration: end-to-end tests that exercise the full Medha pipeline",
     "pgvector: tests that require a running PostgreSQL with pgvector extension",
     "vectorchord: tests that require a running PostgreSQL with vectorchord extension",
     "elasticsearch: tests that require a running Elasticsearch 8.x instance",

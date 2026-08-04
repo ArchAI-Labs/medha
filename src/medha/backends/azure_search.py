@@ -10,7 +10,7 @@ from typing import Any
 from medha.backends._escape import quote_sql_literal
 from medha.exceptions import ConfigurationError, StorageError, StorageInitializationError
 from medha.interfaces.storage import VectorStorageBackend
-from medha.types import CacheEntry, CacheResult
+from medha.types import CacheEntry, CacheResult, PersistedStats
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +43,25 @@ _SCALAR_FIELDS = [
 
 def _az_index_name(collection_name: str, prefix: str) -> str:
     return re.sub(r"[^a-z0-9-]", "-", f"{prefix}-{collection_name}".lower()).strip("-")[:128]
+
+
+def _az_meta_index_name(collection_name: str, prefix: str) -> str:
+    """Sidecar index holding the stats document for *collection_name*.
+
+    Built from the already-sanitised data index name, trimmed so the suffix
+    always fits inside Azure's 128-character index-name limit.
+    """
+    return f"{_az_index_name(collection_name, prefix)[:123]}-meta"
+
+
+def _az_stats_key(collection_name: str) -> str:
+    """Document key of the stats document.
+
+    Azure AI Search document keys accept only letters, digits, ``-``, ``_`` and
+    ``=``; everything else is folded to an underscore.
+    """
+    safe = re.sub(r"[^A-Za-z0-9_=-]", "_", collection_name)
+    return f"stats_{safe}"
 
 
 def _dt_to_iso(dt: datetime | None) -> str | None:
@@ -111,6 +130,7 @@ class AzureSearchBackend(VectorStorageBackend):
         from medha.config import Settings
         self._settings = settings or Settings()
         self._search_clients: dict[str, AsyncSearchClient] = {}
+        self._meta_clients: dict[str, AsyncSearchClient] = {}
         self._index_client: AsyncSearchIndexClient | None = None
         self._credential: Any = None
 
@@ -470,10 +490,93 @@ class AzureSearchBackend(VectorStorageBackend):
             ) from e
         self._search_clients.pop(collection_name, None)
 
+    def _get_meta_client(self, collection_name: str) -> AsyncSearchClient:
+        """SearchClient for the sidecar stats index (does not create the index)."""
+        if collection_name in self._meta_clients:
+            return self._meta_clients[collection_name]
+        if self._index_client is None:
+            raise StorageError("Not connected. Call connect() first.")
+        client = AsyncSearchClient(
+            self._settings.azure_search_endpoint,
+            _az_meta_index_name(collection_name, self._settings.azure_search_index_name),
+            self._credential,
+            api_version=self._settings.azure_search_api_version,
+        )
+        self._meta_clients[collection_name] = client
+        return client
+
+    async def _ensure_meta_index(self, collection_name: str) -> None:
+        """Create the sidecar stats index if it does not exist yet."""
+        if self._index_client is None:
+            raise StorageError("Not connected. Call connect() first.")
+        index_name = _az_meta_index_name(
+            collection_name, self._settings.azure_search_index_name
+        )
+        try:
+            await self._index_client.get_index(index_name)
+            return
+        except ResourceNotFoundError:
+            pass
+        except HttpResponseError as e:
+            raise StorageError(
+                f"Azure Search save_stats failed to check index '{index_name}': {e}"
+            ) from e
+
+        index = SearchIndex(
+            name=index_name,
+            fields=[
+                SimpleField(name="id", type=SearchFieldDataType.String, key=True, filterable=True),
+                SimpleField(name="stats_json", type=SearchFieldDataType.String),
+            ],
+        )
+        try:
+            await self._index_client.create_index(index)
+            logger.info("Created Azure Search stats index '%s'", index_name)
+        except HttpResponseError as e:
+            raise StorageError(
+                f"Azure Search save_stats failed to create index '{index_name}': {e}"
+            ) from e
+
+    async def load_stats(self, collection_name: str) -> PersistedStats | None:
+        client = self._get_meta_client(collection_name)
+        try:
+            doc = await client.get_document(key=_az_stats_key(collection_name))
+        except ResourceNotFoundError:
+            # Neither the index nor the document exists yet — never saved.
+            return None
+        except HttpResponseError as e:
+            raise StorageError(
+                f"Azure Search load_stats failed on '{collection_name}': {e}"
+            ) from e
+
+        raw = (doc or {}).get("stats_json")
+        if not raw:
+            return None
+        try:
+            return PersistedStats.model_validate_json(raw)
+        except Exception as e:
+            raise StorageError(
+                f"Azure Search load_stats failed to parse stats for '{collection_name}': {e}"
+            ) from e
+
+    async def save_stats(self, collection_name: str, stats: PersistedStats) -> None:
+        await self._ensure_meta_index(collection_name)
+        client = self._get_meta_client(collection_name)
+        try:
+            await client.merge_or_upload_documents([{
+                "id": _az_stats_key(collection_name),
+                "stats_json": stats.model_dump_json(),
+            }])
+        except HttpResponseError as e:
+            raise StorageError(
+                f"Azure Search save_stats failed on '{collection_name}': {e}"
+            ) from e
+
     async def close(self) -> None:
-        for client in self._search_clients.values():
+        for client in (*self._search_clients.values(), *self._meta_clients.values()):
             await client.close()
         self._search_clients.clear()
+        self._meta_clients.clear()
         if self._index_client is not None:
             await self._index_client.close()
             self._index_client = None

@@ -1606,6 +1606,21 @@ asyncio.run(main())
       (`feedback_incorrect_threshold`).
 * [x] `medha` CLI — `pip install "medha-archai[cli]"`. Commands: stats,
       warm, invalidate, invalidate-collection, expire, dedup, export, feedback.
+* [x] `medha search` and `medha health` CLI commands, plus `--json` output on
+      `stats`.
+* [x] `OpenAICompatibleAdapter` (Ollama, vLLM, LocalAI, LM Studio) and
+      `MistralAdapter` — two new embedding providers.
+* [x] Async context manager — `async with Medha(...) as cache:`.
+* [x] `search_batch()` — batched lookup with a single embedding round-trip and
+      concurrent waterfall searches.
+* [x] Startup validation — `start()` probes the backend
+      (`validate_on_start`).
+* [x] Security hardening: FIPS-safe cache-key hashing, centralised SQL/OData
+      literal escaping, VectorChord `vc_lists` validation, `SECURITY.md`.
+* [x] Persistent `CacheStats` — metrics survive process restarts
+      (`load_stats` / `save_stats`, `stats_persist_interval`).
+* [x] Feedback score boosting — rank results by accumulated trust
+      (`feedback_boost_factor`).
 
 ---
 

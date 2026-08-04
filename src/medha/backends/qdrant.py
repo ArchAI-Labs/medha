@@ -36,9 +36,22 @@ from qdrant_client.models import (
 from medha.config import Settings
 from medha.exceptions import StorageError, StorageInitializationError
 from medha.interfaces.storage import VectorStorageBackend
-from medha.types import CacheEntry, CacheResult
+from medha.types import CacheEntry, CacheResult, PersistedStats
 
 logger = logging.getLogger(__name__)
+
+# Single point holding the stats blob inside the per-collection meta collection.
+_STATS_POINT_ID = 0
+_STATS_PAYLOAD_KEY = "stats_json"
+
+
+def _meta_collection_name(collection_name: str) -> str:
+    """Name of the payload-only sidecar collection holding a collection's stats.
+
+    Qdrant accepts the same character set for the suffixed name as for the
+    collection name itself, so the suffix is all that is needed here.
+    """
+    return f"{collection_name}__meta"
 
 
 class QdrantBackend(VectorStorageBackend):
@@ -641,6 +654,69 @@ class QdrantBackend(VectorStorageBackend):
         except Exception as e:
             raise StorageError(
                 f"Qdrant update_feedback failed on '{collection_name}': {e}"
+            ) from e
+
+    # --- Stats persistence ---
+
+    async def load_stats(self, collection_name: str) -> PersistedStats | None:
+        """Read the stats blob from the collection's ``__meta`` sidecar."""
+        meta_name = _meta_collection_name(collection_name)
+        try:
+            if not await self.client.collection_exists(meta_name):
+                return None
+            points = await self.client.retrieve(
+                collection_name=meta_name,
+                ids=[_STATS_POINT_ID],
+                with_payload=True,
+            )
+        except StorageError:
+            raise
+        except Exception as e:
+            raise StorageError(
+                f"Qdrant load_stats failed on '{collection_name}': {e}"
+            ) from e
+
+        if not points:
+            return None
+        raw = (points[0].payload or {}).get(_STATS_PAYLOAD_KEY)
+        if not raw:
+            return None
+        try:
+            return PersistedStats.model_validate_json(raw)
+        except Exception as e:
+            raise StorageError(
+                f"Qdrant load_stats failed to parse stats for '{collection_name}': {e}"
+            ) from e
+
+    async def save_stats(self, collection_name: str, stats: PersistedStats) -> None:
+        """Upsert the stats blob into the collection's ``__meta`` sidecar.
+
+        The sidecar carries a 1-dimensional dummy vector: Qdrant requires a
+        vector config, but this collection is only ever read by point ID.
+        """
+        meta_name = _meta_collection_name(collection_name)
+        try:
+            if not await self.client.collection_exists(meta_name):
+                await self.client.create_collection(
+                    collection_name=meta_name,
+                    vectors_config=VectorParams(size=1, distance=Distance.COSINE),
+                )
+            await self.client.upsert(
+                collection_name=meta_name,
+                wait=True,
+                points=[
+                    PointStruct(
+                        id=_STATS_POINT_ID,
+                        vector=[1.0],
+                        payload={_STATS_PAYLOAD_KEY: stats.model_dump_json()},
+                    )
+                ],
+            )
+        except StorageError:
+            raise
+        except Exception as e:
+            raise StorageError(
+                f"Qdrant save_stats failed on '{collection_name}': {e}"
             ) from e
 
     # --- Private methods ---
