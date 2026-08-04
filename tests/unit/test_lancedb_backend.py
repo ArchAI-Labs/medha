@@ -590,3 +590,122 @@ def test_table_name_without_prefix():
     b = LanceDBBackend.__new__(LanceDBBackend)
     b._settings = _lancedb_settings(lancedb_table_prefix="")
     assert b._table_name("cache") == "cache"
+
+
+# ---------------------------------------------------------------------------
+# load_stats / save_stats
+# ---------------------------------------------------------------------------
+
+
+def test_meta_table_name_uses_the_table_name_sanitiser():
+    from medha.backends.lancedb import LanceDBBackend
+
+    b = LanceDBBackend.__new__(LanceDBBackend)
+    b._settings = _lancedb_settings(lancedb_table_prefix="myapp")
+    assert b._meta_table_name() == "myapp_meta"
+    assert b._meta_table_name() == b._table_name("meta")
+
+
+async def test_save_stats_merge_inserts_row(lancedb_backend, mock_lancedb_db):
+    from medha.types import PersistedStats
+
+    b, table = lancedb_backend
+    merge_chain = _make_merge_chain()
+    table.merge_insert.return_value = merge_chain
+
+    await b.save_stats(COLL, PersistedStats(total_requests=14, total_hits=9))
+
+    assert mock_lancedb_db.create_table.call_args.args[0] == b._meta_table_name()
+    assert mock_lancedb_db.create_table.call_args.kwargs["exist_ok"] is True
+
+    table.merge_insert.assert_called_with("id")
+    rows = merge_chain.execute.call_args.args[0]
+    assert rows[0]["id"] == COLL
+    assert PersistedStats.model_validate_json(rows[0]["stats_json"]).total_requests == 14
+
+
+async def test_load_stats_returns_parsed_snapshot(lancedb_backend):
+    from medha.types import PersistedStats
+
+    b, table = lancedb_backend
+    stats = PersistedStats(total_requests=6, hits_by_strategy={"fuzzy": 2})
+    chain = _make_query_chain([{"id": COLL, "stats_json": stats.model_dump_json()}])
+    table.query.return_value = chain
+
+    loaded = await b.load_stats(COLL)
+
+    assert loaded is not None
+    assert loaded.total_requests == 6
+    assert loaded.hits_by_strategy == {"fuzzy": 2}
+    assert chain.where.call_args.args[0] == f"id = '{COLL}'"
+
+
+async def test_load_stats_escapes_quotes_in_collection_name(lancedb_backend):
+    b, table = lancedb_backend
+    chain = _make_query_chain([])
+    table.query.return_value = chain
+
+    assert await b.load_stats("bad' OR '1'='1") is None
+
+    # Single quotes are doubled, so the literal cannot break out of the filter
+    assert chain.where.call_args.args[0] == "id = 'bad'' OR ''1''=''1'"
+
+
+async def test_load_stats_returns_none_when_absent(lancedb_backend):
+    b, table = lancedb_backend
+    table.query.return_value = _make_query_chain([])
+
+    assert await b.load_stats(COLL) is None
+
+
+async def test_load_stats_wraps_errors(lancedb_backend):
+    b, table = lancedb_backend
+    chain = _make_query_chain([])
+    chain.to_list = AsyncMock(side_effect=RuntimeError("boom"))
+    table.query.return_value = chain
+
+    with pytest.raises(StorageError, match="load_stats failed"):
+        await b.load_stats(COLL)
+
+
+async def test_save_stats_wraps_errors(lancedb_backend):
+    from medha.types import PersistedStats
+
+    b, table = lancedb_backend
+    merge_chain = _make_merge_chain()
+    merge_chain.execute = AsyncMock(side_effect=RuntimeError("boom"))
+    table.merge_insert.return_value = merge_chain
+
+    with pytest.raises(StorageError, match="save_stats failed"):
+        await b.save_stats(COLL, PersistedStats())
+
+
+async def test_meta_table_is_created_once(lancedb_backend, mock_lancedb_db):
+    from medha.types import PersistedStats
+
+    b, table = lancedb_backend
+    mock_lancedb_db.create_table.reset_mock()
+
+    await b.save_stats(COLL, PersistedStats())
+    await b.save_stats(COLL, PersistedStats())
+    await b.load_stats(COLL)
+
+    assert mock_lancedb_db.create_table.call_count == 1
+
+
+async def test_stats_methods_require_connection():
+    from medha.backends.lancedb import LanceDBBackend
+    from medha.types import PersistedStats
+
+    b = LanceDBBackend.__new__(LanceDBBackend)
+    b._db = None
+    b._tables = {}
+    b._dimensions = {}
+    b._meta_table = None
+    b._settings = _lancedb_settings()
+
+    with pytest.raises(StorageError, match="connect()"):
+        await b.load_stats(COLL)
+
+    with pytest.raises(StorageError, match="connect()"):
+        await b.save_stats(COLL, PersistedStats())

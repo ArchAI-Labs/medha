@@ -5,7 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any
 
-from medha.types import CacheEntry, CacheResult
+from medha.types import CacheEntry, CacheResult, PersistedStats
 
 
 class VectorStorageBackend(ABC):
@@ -192,6 +192,42 @@ class VectorStorageBackend(ABC):
     async def close(self) -> None:
         """Release resources (close connections, etc.)."""
         ...
+
+    # --- Optional overrides (non-abstract: subclasses keep working unchanged) ---
+
+    async def load_stats(self, collection_name: str) -> PersistedStats | None:
+        """Load persisted statistics for the collection, or None if not yet saved.
+
+        Default implementation returns None (stats persistence not supported).
+        Backends that support it store the stats as a JSON blob under the key
+        f"_medha_stats_{collection_name}" (in a dedicated metadata location
+        appropriate for the backend — not in the main vector index).
+
+        Returns:
+            PersistedStats if previously saved, None otherwise.
+
+        Raises:
+            StorageError: If the load fails (not if simply absent).
+        """
+        return None
+
+    async def save_stats(
+        self,
+        collection_name: str,
+        stats: PersistedStats,
+    ) -> None:
+        """Persist statistics for the collection.
+
+        Default implementation is a no-op (stats persistence not supported).
+
+        Args:
+            collection_name: Target collection.
+            stats:           Snapshot to persist.
+
+        Raises:
+            StorageError: If the save fails.
+        """
+        return
 
     async def connect(self) -> None:
         """Establish connection. No-op for backends that don't require it."""

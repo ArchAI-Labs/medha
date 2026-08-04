@@ -169,6 +169,69 @@ class TestUpdateUsageCount:
         await backend.update_usage_count(COLLECTION, "nonexistent-id")
 
 
+class TestStats:
+    async def test_load_stats_returns_none_when_never_saved(self, backend):
+        await backend.initialize(COLLECTION, DIMENSION)
+
+        assert await backend.load_stats(COLLECTION) is None
+
+    async def test_save_then_load_round_trip(self, backend):
+        from medha.types import PersistedStats
+
+        await backend.initialize(COLLECTION, DIMENSION)
+        stats = PersistedStats(
+            total_requests=12,
+            total_hits=9,
+            total_misses=3,
+            hits_by_strategy={"exact": 5, "semantic": 4},
+        )
+
+        await backend.save_stats(COLLECTION, stats)
+        loaded = await backend.load_stats(COLLECTION)
+
+        assert loaded is not None
+        assert loaded.total_requests == 12
+        assert loaded.total_hits == 9
+        assert loaded.hits_by_strategy == {"exact": 5, "semantic": 4}
+
+    async def test_save_stats_overwrites_previous_snapshot(self, backend):
+        from medha.types import PersistedStats
+
+        await backend.initialize(COLLECTION, DIMENSION)
+        await backend.save_stats(COLLECTION, PersistedStats(total_requests=1))
+        await backend.save_stats(COLLECTION, PersistedStats(total_requests=99))
+
+        loaded = await backend.load_stats(COLLECTION)
+
+        assert loaded is not None
+        assert loaded.total_requests == 99
+
+    async def test_stats_do_not_pollute_the_data_collection(self, backend, embedder):
+        from medha.types import PersistedStats
+
+        await backend.initialize(COLLECTION, DIMENSION)
+        await backend.upsert(
+            COLLECTION, [await _make_entry(embedder, "q", "SELECT 1")]
+        )
+
+        await backend.save_stats(COLLECTION, PersistedStats(total_requests=4))
+
+        assert await backend.count(COLLECTION) == 1
+
+    async def test_stats_are_isolated_per_collection(self, backend):
+        from medha.types import PersistedStats
+
+        await backend.initialize(COLLECTION, DIMENSION)
+        await backend.initialize("other_collection", DIMENSION)
+
+        await backend.save_stats(COLLECTION, PersistedStats(total_requests=7))
+
+        assert await backend.load_stats("other_collection") is None
+        loaded = await backend.load_stats(COLLECTION)
+        assert loaded is not None
+        assert loaded.total_requests == 7
+
+
 class TestCloseAndReopen:
     async def test_close_and_reopen(self):
         settings = Settings(qdrant_mode="memory")

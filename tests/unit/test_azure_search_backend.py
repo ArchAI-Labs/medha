@@ -572,3 +572,143 @@ async def test_search_by_normalized_question_not_found(az_backend):
     result = await b.search_by_normalized_question(COLL, "nothing")
 
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# load_stats / save_stats
+# ---------------------------------------------------------------------------
+
+
+def test_meta_index_name_and_stats_key_are_sanitised():
+    from medha.backends.azure_search import (
+        _az_index_name,
+        _az_meta_index_name,
+        _az_stats_key,
+    )
+
+    assert _az_meta_index_name("my_cache", "medha") == "medha-my-cache-meta"
+    assert _az_meta_index_name("my_cache", "medha") != _az_index_name("my_cache", "medha")
+    # Long names stay inside Azure's 128-character limit, suffix intact
+    long_name = _az_meta_index_name("x" * 400, "medha")
+    assert len(long_name) <= 128
+    assert long_name.endswith("-meta")
+
+    # Document keys accept only [A-Za-z0-9_=-]; everything else is folded
+    assert _az_stats_key("my_cache") == "stats_my_cache"
+    assert _az_stats_key("my cache'; DROP") == "stats_my_cache___DROP"
+
+
+async def test_save_stats_creates_meta_index_and_uploads(az_backend):
+    from medha.backends.azure_search import _az_meta_index_name, _az_stats_key
+    from medha.types import PersistedStats
+
+    b, search_client, index_client = az_backend
+    index_client.create_index.reset_mock()
+    search_client.merge_or_upload_documents.reset_mock()
+
+    await b.save_stats(COLL, PersistedStats(total_requests=13, total_hits=8))
+
+    created = index_client.create_index.call_args.args[0]
+    assert created.name == _az_meta_index_name(COLL, b._settings.azure_search_index_name)
+    assert {f.name for f in created.fields} == {"id", "stats_json"}
+
+    search_client.merge_or_upload_documents.assert_awaited_once()
+    docs = search_client.merge_or_upload_documents.call_args.args[0]
+    assert docs[0]["id"] == _az_stats_key(COLL)
+    assert PersistedStats.model_validate_json(docs[0]["stats_json"]).total_requests == 13
+
+
+async def test_save_stats_skips_create_when_meta_index_exists(az_backend):
+    from medha.types import PersistedStats
+
+    b, search_client, index_client = az_backend
+    index_client.get_index.side_effect = None
+    index_client.get_index.return_value = MagicMock()
+    index_client.create_index.reset_mock()
+
+    await b.save_stats(COLL, PersistedStats())
+
+    index_client.create_index.assert_not_awaited()
+    search_client.merge_or_upload_documents.assert_awaited()
+
+
+async def test_load_stats_returns_parsed_snapshot(az_backend):
+    from medha.backends.azure_search import _az_stats_key
+    from medha.types import PersistedStats
+
+    b, search_client, _ = az_backend
+    stats = PersistedStats(total_requests=5, hits_by_strategy={"exact": 5})
+    search_client.get_document = AsyncMock(
+        return_value={"id": _az_stats_key(COLL), "stats_json": stats.model_dump_json()}
+    )
+
+    loaded = await b.load_stats(COLL)
+
+    assert loaded is not None
+    assert loaded.total_requests == 5
+    assert loaded.hits_by_strategy == {"exact": 5}
+    assert search_client.get_document.call_args.kwargs["key"] == _az_stats_key(COLL)
+
+
+async def test_load_stats_returns_none_when_absent(az_backend):
+    from azure.core.exceptions import ResourceNotFoundError
+
+    b, search_client, _ = az_backend
+    search_client.get_document = AsyncMock(side_effect=ResourceNotFoundError())
+
+    assert await b.load_stats(COLL) is None
+
+
+async def test_load_stats_wraps_http_errors(az_backend):
+    from azure.core.exceptions import HttpResponseError
+
+    b, search_client, _ = az_backend
+    search_client.get_document = AsyncMock(side_effect=HttpResponseError("boom"))
+
+    with pytest.raises(StorageError, match="load_stats failed"):
+        await b.load_stats(COLL)
+
+
+async def test_save_stats_wraps_http_errors(az_backend):
+    from azure.core.exceptions import HttpResponseError
+
+    from medha.types import PersistedStats
+
+    b, search_client, _ = az_backend
+    search_client.merge_or_upload_documents = AsyncMock(
+        side_effect=HttpResponseError("boom")
+    )
+
+    with pytest.raises(StorageError, match="save_stats failed"):
+        await b.save_stats(COLL, PersistedStats())
+
+
+async def test_close_closes_meta_clients(az_backend):
+    from medha.types import PersistedStats
+
+    b, search_client, _ = az_backend
+    await b.save_stats(COLL, PersistedStats())
+    assert b._meta_clients
+
+    await b.close()
+
+    assert not b._meta_clients
+    search_client.close.assert_awaited()
+
+
+async def test_stats_methods_require_connection():
+    from medha.backends.azure_search import AzureSearchBackend
+    from medha.types import PersistedStats
+
+    b = AzureSearchBackend.__new__(AzureSearchBackend)
+    b._search_clients = {}
+    b._meta_clients = {}
+    b._index_client = None
+    b._credential = None
+    b._settings = _az_settings()
+
+    with pytest.raises(StorageError, match="connect"):
+        await b.load_stats(COLL)
+
+    with pytest.raises(StorageError, match="connect"):
+        await b.save_stats(COLL, PersistedStats())

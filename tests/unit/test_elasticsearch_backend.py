@@ -589,3 +589,108 @@ async def test_search_by_normalized_question_not_found(es_backend):
     result = await b.search_by_normalized_question(COLL, "nothing")
 
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# load_stats / save_stats
+# ---------------------------------------------------------------------------
+
+
+def test_meta_index_name_is_derived_from_sanitised_index_name():
+    """The stats index reuses the data index sanitiser, plus a suffix."""
+    from medha.backends.elasticsearch import ElasticsearchBackend
+
+    b = ElasticsearchBackend.__new__(ElasticsearchBackend)
+    b._settings = _es_settings(es_index_prefix="medha")
+
+    assert b._meta_index_name("my_cache") == "medha_my_cache__meta"
+    # Uppercase and unsafe characters are folded exactly as for the data index
+    assert b._meta_index_name("My-Cache.V2") == "medha_my-cache_v2__meta"
+    # Long names stay inside the 255-byte limit without losing the suffix
+    long_name = b._meta_index_name("x" * 400)
+    assert len(long_name) <= 255
+    assert long_name.endswith("__meta")
+
+
+async def test_save_stats_indexes_stats_document(es_backend):
+    from medha.types import PersistedStats
+
+    b, client = es_backend
+    await b.initialize(COLL, DIM)
+
+    await b.save_stats(COLL, PersistedStats(total_requests=11, total_hits=6))
+
+    client.index.assert_awaited_once()
+    kwargs = client.index.call_args.kwargs
+    assert kwargs["index"] == b._meta_index_name(COLL)
+    assert kwargs["index"] != b._index_name(COLL)
+    assert kwargs["id"] == "_stats"
+    parsed = PersistedStats.model_validate_json(kwargs["document"]["stats_json"])
+    assert parsed.total_requests == 11
+
+
+async def test_load_stats_returns_parsed_snapshot(es_backend):
+    from medha.types import PersistedStats
+
+    b, client = es_backend
+    await b.initialize(COLL, DIM)
+    stats = PersistedStats(total_requests=4, hits_by_strategy={"fuzzy": 1})
+    client.get = AsyncMock(return_value={"_source": {"stats_json": stats.model_dump_json()}})
+
+    loaded = await b.load_stats(COLL)
+
+    assert loaded is not None
+    assert loaded.total_requests == 4
+    assert loaded.hits_by_strategy == {"fuzzy": 1}
+    assert client.get.call_args.kwargs["id"] == "_stats"
+
+
+async def test_load_stats_returns_none_when_absent(es_backend):
+    from elasticsearch import NotFoundError
+
+    b, client = es_backend
+    await b.initialize(COLL, DIM)
+    client.get = AsyncMock(
+        side_effect=NotFoundError(404, {}, {"error": "index_not_found_exception"})
+    )
+
+    assert await b.load_stats(COLL) is None
+
+
+async def test_load_stats_wraps_transport_errors(es_backend):
+    from elasticsearch import TransportError
+
+    b, client = es_backend
+    await b.initialize(COLL, DIM)
+    client.get = AsyncMock(side_effect=TransportError("boom"))
+
+    with pytest.raises(StorageError, match="load_stats failed"):
+        await b.load_stats(COLL)
+
+
+async def test_save_stats_wraps_transport_errors(es_backend):
+    from elasticsearch import TransportError
+
+    from medha.types import PersistedStats
+
+    b, client = es_backend
+    await b.initialize(COLL, DIM)
+    client.index = AsyncMock(side_effect=TransportError("boom"))
+
+    with pytest.raises(StorageError, match="save_stats failed"):
+        await b.save_stats(COLL, PersistedStats())
+
+
+async def test_stats_methods_require_connection():
+    from medha.backends.elasticsearch import ElasticsearchBackend
+    from medha.types import PersistedStats
+
+    b = ElasticsearchBackend.__new__(ElasticsearchBackend)
+    b._client = None
+    b._settings = _es_settings()
+
+    with pytest.raises(StorageError, match="connect()"):
+        await b.load_stats(COLL)
+
+    with pytest.raises(StorageError, match="connect()"):
+        await b.save_stats(COLL, PersistedStats())

@@ -6,7 +6,7 @@ import uuid
 import pytest
 
 from medha.interfaces.storage import VectorStorageBackend
-from medha.types import CacheEntry, CacheResult
+from medha.types import CacheEntry, CacheResult, PersistedStats
 
 
 def _make_entry(
@@ -56,6 +56,56 @@ class TestVectorStorageBackendABC:
 
         with pytest.raises(TypeError):
             PartialBackend()
+
+    async def test_stats_methods_are_optional(self):
+        """A backend that does not override load/save_stats still instantiates."""
+
+        class MinimalBackend(VectorStorageBackend):
+            """Implements ONLY the abstract methods — no stats support."""
+
+            async def initialize(self, collection_name, dimension, **kwargs):
+                pass
+
+            async def search(self, collection_name, vector, limit=5, score_threshold=0.0):
+                return []
+
+            async def upsert(self, collection_name, entries):
+                pass
+
+            async def scroll(self, collection_name, limit=100, offset=None, with_vectors=False):
+                return [], None
+
+            async def count(self, collection_name):
+                return 0
+
+            async def delete(self, collection_name, ids):
+                pass
+
+            async def find_expired(self, collection_name):
+                return []
+
+            async def search_by_normalized_question(self, collection_name, normalized_question):
+                return None
+
+            async def find_by_query_hash(self, collection_name, query_hash):
+                return []
+
+            async def find_by_template_id(self, collection_name, template_id):
+                return []
+
+            async def drop_collection(self, collection_name):
+                pass
+
+            async def update_feedback(self, collection_name, point_id, correct):
+                return 0
+
+            async def close(self):
+                pass
+
+        backend = MinimalBackend()  # must not raise TypeError
+
+        assert await backend.load_stats("c") is None
+        await backend.save_stats("c", PersistedStats())  # must not raise
 
 
 # ---------------------------------------------------------------------------
@@ -238,3 +288,49 @@ class TestBackendContract:
         )
 
         assert result == 0
+
+    async def test_load_stats_returns_none_initially(self, any_backend):
+        await any_backend.initialize("stats_contract", 8)
+
+        assert await any_backend.load_stats("stats_contract") is None
+
+    async def test_save_stats_and_load_roundtrip(self, any_backend):
+        await any_backend.initialize("stats_contract_rt", 8)
+        snapshot = PersistedStats(
+            total_requests=12,
+            total_hits=9,
+            total_misses=2,
+            total_errors=1,
+            hits_by_strategy={"semantic_match": 6, "l1_cache": 3},
+        )
+
+        await any_backend.save_stats("stats_contract_rt", snapshot)
+        loaded = await any_backend.load_stats("stats_contract_rt")
+
+        assert loaded is not None
+        assert loaded.total_requests == 12
+        assert loaded.total_hits == 9
+        assert loaded.total_misses == 2
+        assert loaded.total_errors == 1
+        assert loaded.hits_by_strategy["semantic_match"] == 6
+        assert loaded.hits_by_strategy["l1_cache"] == 3
+
+    async def test_save_stats_overwrites_previous(self, any_backend):
+        await any_backend.initialize("stats_contract_ow", 8)
+
+        await any_backend.save_stats("stats_contract_ow", PersistedStats(total_requests=1))
+        await any_backend.save_stats("stats_contract_ow", PersistedStats(total_requests=2))
+
+        loaded = await any_backend.load_stats("stats_contract_ow")
+        assert loaded is not None
+        assert loaded.total_requests == 2
+
+    async def test_stats_are_isolated_per_collection(self, any_backend):
+        await any_backend.initialize("stats_coll_a", 8)
+        await any_backend.initialize("stats_coll_b", 8)
+
+        await any_backend.save_stats("stats_coll_a", PersistedStats(total_requests=7))
+
+        assert await any_backend.load_stats("stats_coll_b") is None
+        loaded_a = await any_backend.load_stats("stats_coll_a")
+        assert loaded_a is not None and loaded_a.total_requests == 7

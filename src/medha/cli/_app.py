@@ -151,8 +151,8 @@ def stats(
     """Show structural stats for a collection.
 
     Reports collection name, backend type, and entry counts (main + templates).
-    Does NOT report hit rate or latency: those are in-process, non-persistent
-    metrics unavailable from a fresh CLI invocation.
+    Latency percentiles remain in-process only, but hit rate and per-strategy
+    counts are shown when the backend has a persisted snapshot (0.5.0+).
     """
     settings = Settings()
     coll = collection or settings.collection
@@ -166,21 +166,46 @@ def stats(
                 except StorageError:
                     tmpl_count = 0
                 backend_name = type(m._backend).__name__
+                try:
+                    persisted = await m._backend.load_stats(m._collection_name)
+                except StorageError:
+                    persisted = None
         except (ConfigurationError, RuntimeError) as exc:
             typer.echo(f"Error: {exc}", err=True)
             raise typer.Exit(code=1)
         if json_output:
             import json
-            print(json.dumps({
+            payload: dict[str, object | None] = {
                 "collection": coll,
                 "backend_type": settings.backend_type,
                 "entries": main_count,
                 "templates": tmpl_count,
-            }, indent=2))
+            }
+            if persisted is not None:
+                payload["total_requests"] = persisted.total_requests
+                payload["hit_rate"] = persisted.hit_rate
+                payload["hits_by_strategy"] = persisted.hits_by_strategy
+            else:
+                payload["total_requests"] = None
+                payload["hit_rate"] = None
+                payload["hits_by_strategy"] = None
+            print(json.dumps(payload, indent=2))
         else:
             typer.echo(f"Collection : {coll}")
             typer.echo(f"Backend    : {backend_name} ({settings.backend_type})")
             typer.echo(f"Entries    : {main_count} (main)  {tmpl_count} (templates)")
+            if persisted is None:
+                typer.echo("Stats      : not yet persisted (run some searches first)")
+            else:
+                by_strategy = persisted.hits_by_strategy
+                typer.echo(f"Requests   : {persisted.total_requests}")
+                typer.echo(f"Hit rate   : {persisted.hit_rate:.1%}")
+                typer.echo("By strategy:")
+                typer.echo(f"  L1       : {by_strategy.get('l1_cache', 0)}")
+                typer.echo(f"  Template : {by_strategy.get('template_match', 0)}")
+                typer.echo(f"  Exact    : {by_strategy.get('exact_match', 0)}")
+                typer.echo(f"  Semantic : {by_strategy.get('semantic_match', 0)}")
+                typer.echo(f"  Fuzzy    : {by_strategy.get('fuzzy_match', 0)}")
 
     asyncio.run(_run())
 

@@ -32,6 +32,8 @@ def _make_mock_medha(**overrides):
     m._template_collection = "default_templates"
     m._backend = MagicMock()
     m._backend.count = AsyncMock(return_value=0)
+    # Default backend contract: no snapshot persisted yet (0.5.0+).
+    m._backend.load_stats = AsyncMock(return_value=None)
     for k, v in overrides.items():
         setattr(m, k, v)
     return m

@@ -7,7 +7,7 @@ from typing import Any
 
 from medha.exceptions import ConfigurationError, StorageError, StorageInitializationError
 from medha.interfaces.storage import VectorStorageBackend
-from medha.types import CacheEntry, CacheResult
+from medha.types import CacheEntry, CacheResult, PersistedStats
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +45,15 @@ def _index_name(key_prefix: str, collection_name: str) -> str:
 
 def _key_prefix(key_prefix: str, collection_name: str) -> str:
     return f"{key_prefix}:{_safe_name(collection_name)}"
+
+
+def _stats_key(key_prefix: str, collection_name: str) -> str:
+    """Plain string key holding the stats JSON for *collection_name*.
+
+    Sits outside every ``{key_prefix}:{collection}:`` hash prefix, so RediSearch
+    never indexes it as a cache entry.
+    """
+    return f"{key_prefix}:__stats:{_safe_name(collection_name)}"
 
 
 def _doc_to_result(doc: Any, score: float) -> CacheResult:
@@ -502,6 +511,37 @@ class RedisVectorBackend(VectorStorageBackend):
                 raise StorageError(
                     f"Redis drop_collection fallback scan failed on '{collection_name}': {scan_e}"
                 ) from scan_e
+
+    async def load_stats(self, collection_name: str) -> PersistedStats | None:
+        if self._client is None:
+            raise StorageError("Not connected. Call connect() first.")
+        key = _stats_key(self._settings.redis_key_prefix, collection_name)
+        try:
+            raw = await self._client.get(key)
+        except Exception as e:
+            raise StorageError(
+                f"Redis load_stats failed on '{collection_name}': {e}"
+            ) from e
+
+        if not raw:
+            return None
+        try:
+            return PersistedStats.model_validate_json(raw)
+        except Exception as e:
+            raise StorageError(
+                f"Redis load_stats failed to parse stats for '{collection_name}': {e}"
+            ) from e
+
+    async def save_stats(self, collection_name: str, stats: PersistedStats) -> None:
+        if self._client is None:
+            raise StorageError("Not connected. Call connect() first.")
+        key = _stats_key(self._settings.redis_key_prefix, collection_name)
+        try:
+            await self._client.set(key, stats.model_dump_json())
+        except Exception as e:
+            raise StorageError(
+                f"Redis save_stats failed on '{collection_name}': {e}"
+            ) from e
 
     async def close(self) -> None:
         if self._client is not None:

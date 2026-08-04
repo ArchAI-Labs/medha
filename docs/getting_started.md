@@ -110,7 +110,7 @@ async def main():
             print("Cache miss — send to LLM")
 
         # Print overall statistics
-        stats = await cache.get_stats()
+        stats = await cache.stats()
         print(f"\nHit rate : {stats.hit_rate:.0%}")
         print(f"Total hits: {stats.total_hits}")
         print(f"Total misses: {stats.total_misses}")
