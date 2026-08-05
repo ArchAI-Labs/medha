@@ -544,3 +544,107 @@ async def test_search_by_normalized_question_not_found(chroma_backend):
     result = await b.search_by_normalized_question(COLL, "nothing")
 
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# load_stats / save_stats
+# ---------------------------------------------------------------------------
+
+
+def test_meta_collection_name_is_sanitised():
+    """The stats collection reuses the data sanitiser, plus a suffix."""
+    from medha.backends.chroma import _chroma_meta_collection_name
+
+    assert _chroma_meta_collection_name("my_cache") == "my_cache__meta"
+    assert _chroma_meta_collection_name("My-Cache.V2") == "my-cache_v2__meta"
+    # Long names stay inside Chroma's 63-character limit, suffix intact
+    long_name = _chroma_meta_collection_name("x" * 200)
+    assert len(long_name) <= 63
+    assert long_name.endswith("__meta")
+
+
+async def test_save_stats_upserts_into_meta_collection(chroma_backend, mock_chroma_client):
+    from medha.backends.chroma import _chroma_meta_collection_name
+    from medha.types import PersistedStats
+
+    b, col = chroma_backend
+    await b.initialize(COLL, DIM)
+    col.upsert.reset_mock()
+
+    await b.save_stats(COLL, PersistedStats(total_requests=8, total_hits=5))
+
+    meta_names = [
+        c.kwargs.get("name")
+        for c in mock_chroma_client.get_or_create_collection.call_args_list
+    ]
+    assert _chroma_meta_collection_name(COLL) in meta_names
+
+    col.upsert.assert_called_once()
+    kwargs = col.upsert.call_args.kwargs
+    assert kwargs["ids"] == ["_stats"]
+    parsed = PersistedStats.model_validate_json(kwargs["metadatas"][0]["stats_json"])
+    assert parsed.total_requests == 8
+
+
+async def test_load_stats_returns_parsed_snapshot(chroma_backend):
+    from medha.types import PersistedStats
+
+    b, col = chroma_backend
+    await b.initialize(COLL, DIM)
+    stats = PersistedStats(total_requests=3, hits_by_strategy={"template": 2})
+    col.get.return_value = {
+        "ids": ["_stats"],
+        "metadatas": [{"stats_json": stats.model_dump_json()}],
+    }
+
+    loaded = await b.load_stats(COLL)
+
+    assert loaded is not None
+    assert loaded.total_requests == 3
+    assert loaded.hits_by_strategy == {"template": 2}
+
+
+async def test_load_stats_returns_none_when_absent(chroma_backend):
+    b, col = chroma_backend
+    await b.initialize(COLL, DIM)
+    col.get.return_value = {"ids": [], "metadatas": []}
+
+    assert await b.load_stats(COLL) is None
+
+
+async def test_load_stats_wraps_errors(chroma_backend):
+    b, col = chroma_backend
+    await b.initialize(COLL, DIM)
+    col.get.side_effect = RuntimeError("boom")
+
+    with pytest.raises(StorageError, match="load_stats failed"):
+        await b.load_stats(COLL)
+
+
+async def test_save_stats_wraps_errors(chroma_backend):
+    from medha.types import PersistedStats
+
+    b, col = chroma_backend
+    await b.initialize(COLL, DIM)
+    col.upsert.side_effect = RuntimeError("boom")
+
+    with pytest.raises(StorageError, match="save_stats failed"):
+        await b.save_stats(COLL, PersistedStats())
+
+
+async def test_stats_methods_require_connection():
+    from medha.backends.chroma import ChromaBackend
+    from medha.types import PersistedStats
+
+    b = ChromaBackend.__new__(ChromaBackend)
+    b._client = None
+    b._is_async = False
+    b._collections = {}
+    b._meta_collections = {}
+    b._settings = _chroma_settings()
+
+    with pytest.raises(StorageError, match="connect()"):
+        await b.load_stats(COLL)
+
+    with pytest.raises(StorageError, match="connect()"):
+        await b.save_stats(COLL, PersistedStats())

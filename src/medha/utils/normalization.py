@@ -83,7 +83,7 @@ def question_hash(question: str) -> str:
         32-character hex string.
     """
     normalized = normalize_question(question)
-    return hashlib.md5(normalized.encode("utf-8")).hexdigest()
+    return hashlib.md5(normalized.encode("utf-8"), usedforsecurity=False).hexdigest()
 
 
 def query_hash(query: str) -> str:
@@ -97,4 +97,4 @@ def query_hash(query: str) -> str:
     Returns:
         32-character hex string.
     """
-    return hashlib.md5(query.strip().encode("utf-8")).hexdigest()
+    return hashlib.md5(query.strip().encode("utf-8"), usedforsecurity=False).hexdigest()

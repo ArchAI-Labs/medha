@@ -5,6 +5,104 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] — 2026-08-04
+
+### Added
+
+- **Persistent `CacheStats`**: Medha now persists a `PersistedStats` snapshot to
+  the backend after every `Settings.stats_persist_interval` requests (default 100).
+  Snapshots are loaded on `start()`, so hit-rate and request-count metrics survive
+  process restarts. Writes happen in a background task and are best-effort: a
+  failing snapshot write is logged and never affects the search that triggered it.
+  `close()` drains any in-flight write and flushes a final snapshot before the
+  backend is shut down, so a process that stops between two interval boundaries —
+  including a short-lived or low-traffic one that never reaches the first — does
+  not lose its counters. An instance that served no requests writes nothing, so
+  it cannot clobber a snapshot left by another process.
+
+- **`PersistedStats`** model (`medha.types`): Pydantic snapshot with
+  `total_requests`, `total_hits`, `total_misses`, `total_errors`,
+  `hits_by_strategy`, `last_reset_at`, `updated_at`, and computed
+  `hit_rate` / `miss_rate` properties. Serialised as JSON (never pickle).
+
+- **`VectorStorageBackend.load_stats()`** and **`save_stats()`**: two new
+  methods implemented by all ten built-in backends. They are **not** abstract —
+  they ship with a `return None` / no-op default, so existing custom backends
+  keep working unchanged and simply opt out of stats persistence.
+
+- **`Settings.stats_persist_interval`** (default `100`, env
+  `MEDHA_STATS_PERSIST_INTERVAL`): how often (in requests) the in-memory stats
+  are flushed to the backend.
+
+- **`medha stats` (CLI)** now reports `Requests`, `Hit rate`, and a per-strategy
+  breakdown when the backend holds a persisted snapshot; `--json` gains
+  `total_requests`, `hit_rate`, and `hits_by_strategy` (all `null` when nothing
+  has been persisted yet).
+
+- **Feedback score boosting**: when `Settings.feedback_boost_factor > 0`, the
+  similarity score of a result is adjusted upward proportionally to the fraction
+  of positive feedback it has received. Formula:
+  `adjusted = min(1.0, score × (1 + factor × trust))` where
+  `trust = feedback_correct / (feedback_correct + feedback_incorrect)`.
+  Applied to the semantic and fuzzy tiers only — L1, template, and exact matches
+  are already certainties. Entries with no feedback, or with negative feedback
+  only, are never penalised. With boosting enabled the semantic tier also
+  retrieves candidates down to `threshold / (1 + factor)` — the lowest score a
+  boost could lift over the threshold — and re-ranks candidates by their adjusted
+  score. Default is `0.0` (disabled — fully backward compatible).
+
+- **`Settings.feedback_boost_factor`** (`float`, default `0.0`, range `[0.0, 1.0]`,
+  env `MEDHA_FEEDBACK_BOOST_FACTOR`).
+
+- **Weaviate E2E test** (`tests/integration/test_weaviate_e2e.py`): full end-to-end
+  test for `WeaviateBackend`, skipped when neither `MEDHA_TEST_WEAVIATE_HOST` nor
+  `WEAVIATE_TEST_URL` is set.
+
+- **Azure AI Search E2E test** (`tests/integration/test_azure_search_e2e.py`):
+  full end-to-end test for `AzureSearchBackend`, skipped when neither
+  `MEDHA_TEST_AZURE_SEARCH_ENDPOINT` nor `AZURE_SEARCH_ENDPOINT` is set.
+
+- **Demo notebooks**: `demo/28_persistent_stats.ipynb` (stats surviving a restart
+  on LanceDB, tuning the flush interval) and `demo/29_feedback_boosting.ipynb`
+  (trust formula, choosing a factor, composing with auto-invalidation).
+
+### Fixed
+
+- **Documentation**: the observability and getting-started guides called a
+  non-existent `get_stats()` method — the accessor is `stats()`. The per-strategy
+  snippet also used `strategy.name` and `s.hits`; `by_strategy` is keyed by the
+  strategy **value** (a `str`) and `StrategyStats` exposes `count`, not `hits`.
+  Snippets copied from those pages used to raise `AttributeError`.
+
+### Security
+
+- **FIPS compatibility**: `question_hash()` / `query_hash()` now call
+  `hashlib.md5(..., usedforsecurity=False)` (the digests are cache keys, not a
+  security control). This unblocks execution on FIPS-enabled hosts, where a bare
+  `md5()` call raises, and silences static analysers. Digest values are
+  unchanged — existing caches stay compatible.
+
+- **Centralised filter escaping**: single-quoted SQL/OData literals in
+  `AzureSearchBackend` (OData `$filter`) and `LanceDBBackend` (DataFusion
+  `where`) now go through one audited helper,
+  `medha.backends._escape.quote_sql_literal`, instead of scattered inline
+  `'` → `''` replacements. The new `load_stats` / `save_stats` filter clauses
+  reuse the same helper, and every meta collection/index/table/key name is
+  derived through each backend's existing sanitiser rather than a raw f-string.
+
+- **VectorChord input validation**: `VectorChordBackend.initialize()` validates
+  `vc_lists` before it is interpolated into the `CREATE INDEX … WITH (lists=…)`
+  DDL, rejecting any non-integer passed via `**kwargs` (which bypasses Pydantic)
+  with `StorageInitializationError`. The `Settings` path (already typed
+  `list[int]`) is unchanged.
+
+- **`SECURITY.md`** added — documents the trust model: stored queries are
+  returned verbatim, templates and `parameter_patterns` are trusted config
+  (ReDoS), file loading honours `allowed_file_dir` / `max_file_size_mb`, secrets
+  use `SecretStr`, and backend identifiers are validated or sanitised.
+
+---
+
 ## [0.4.3] — 2026-06-09
 
 ### Added

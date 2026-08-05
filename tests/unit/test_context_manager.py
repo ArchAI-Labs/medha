@@ -14,6 +14,8 @@ def mock_backend():
     backend.connect = AsyncMock()
     backend.count = AsyncMock(return_value=0)
     backend.close = AsyncMock()
+    backend.load_stats = AsyncMock(return_value=None)
+    backend.save_stats = AsyncMock()
     return backend
 
 

@@ -536,3 +536,135 @@ async def test_search_by_normalized_question_not_found(wv_backend):
     result = await b.search_by_normalized_question(COLL, "nothing")
 
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# load_stats / save_stats
+# ---------------------------------------------------------------------------
+
+
+def test_meta_collection_name_and_id_are_derived():
+    """The stats class reuses the data class name; the id is a uuid5."""
+    from medha.backends.weaviate import (
+        _wv_collection_name,
+        _wv_meta_collection_name,
+        _wv_meta_id,
+    )
+
+    assert _wv_meta_collection_name("Medha", "my_cache") == "MedhaMyCacheMeta"
+    assert _wv_meta_collection_name("Medha", "my_cache") == (
+        _wv_collection_name("Medha", "my_cache") + "Meta"
+    )
+
+    # Deterministic, and a valid UUID whatever the collection is called
+    weird = "'; DROP TABLE x; --"
+    assert _wv_meta_id(weird) == _wv_meta_id(weird)
+    assert uuid.UUID(_wv_meta_id(weird))
+    assert _wv_meta_id("a") != _wv_meta_id("b")
+
+
+async def test_save_stats_creates_meta_class_and_upserts(wv_backend):
+    from medha.backends.weaviate import _wv_meta_id
+    from medha.types import PersistedStats
+
+    b, col, client = wv_backend
+    await b.initialize(COLL, DIM)
+    client.collections.create.reset_mock()
+
+    await b.save_stats(COLL, PersistedStats(total_requests=6, total_hits=2))
+
+    created_name = client.collections.create.call_args.kwargs["name"]
+    assert created_name.endswith("Meta")
+
+    col.data.insert_many.assert_awaited()
+    objects = col.data.insert_many.call_args.args[0]
+    assert len(objects) == 1
+    assert str(objects[0].uuid) == _wv_meta_id(COLL)
+    parsed = PersistedStats.model_validate_json(objects[0].properties["statsJson"])
+    assert parsed.total_requests == 6
+
+
+async def test_save_stats_skips_create_when_meta_class_exists(wv_backend):
+    from medha.types import PersistedStats
+
+    b, col, client = wv_backend
+    await b.initialize(COLL, DIM)
+    client.collections.create.reset_mock()
+    client.collections.exists.return_value = True
+
+    await b.save_stats(COLL, PersistedStats())
+
+    client.collections.create.assert_not_awaited()
+    col.data.insert_many.assert_awaited()
+
+
+async def test_load_stats_returns_parsed_snapshot(wv_backend):
+    from medha.types import PersistedStats
+
+    b, col, client = wv_backend
+    await b.initialize(COLL, DIM)
+    client.collections.exists.return_value = True
+    stats = PersistedStats(total_requests=2, hits_by_strategy={"semantic": 1})
+    obj = MagicMock()
+    obj.properties = {"statsJson": stats.model_dump_json()}
+    col.query.fetch_object_by_id.return_value = obj
+
+    loaded = await b.load_stats(COLL)
+
+    assert loaded is not None
+    assert loaded.total_requests == 2
+    assert loaded.hits_by_strategy == {"semantic": 1}
+
+
+async def test_load_stats_returns_none_when_meta_class_missing(wv_backend):
+    b, col, client = wv_backend
+    await b.initialize(COLL, DIM)
+    client.collections.exists.return_value = False
+
+    assert await b.load_stats(COLL) is None
+
+
+async def test_load_stats_returns_none_when_object_missing(wv_backend):
+    b, col, client = wv_backend
+    await b.initialize(COLL, DIM)
+    client.collections.exists.return_value = True
+    col.query.fetch_object_by_id.return_value = None
+
+    assert await b.load_stats(COLL) is None
+
+
+async def test_load_stats_wraps_errors(wv_backend):
+    b, col, client = wv_backend
+    await b.initialize(COLL, DIM)
+    client.collections.exists.return_value = True
+    col.query.fetch_object_by_id.side_effect = RuntimeError("boom")
+
+    with pytest.raises(StorageError, match="load_stats failed"):
+        await b.load_stats(COLL)
+
+
+async def test_save_stats_wraps_errors(wv_backend):
+    from medha.types import PersistedStats
+
+    b, col, client = wv_backend
+    await b.initialize(COLL, DIM)
+    col.data.insert_many.side_effect = RuntimeError("boom")
+
+    with pytest.raises(StorageError, match="save_stats failed"):
+        await b.save_stats(COLL, PersistedStats())
+
+
+async def test_stats_methods_require_connection():
+    from medha.backends.weaviate import WeaviateBackend
+    from medha.types import PersistedStats
+
+    b = WeaviateBackend.__new__(WeaviateBackend)
+    b._client = None
+    b._collections = {}
+    b._settings = _weaviate_settings()
+
+    with pytest.raises(StorageError, match="connect()"):
+        await b.load_stats(COLL)
+
+    with pytest.raises(StorageError, match="connect()"):
+        await b.save_stats(COLL, PersistedStats())

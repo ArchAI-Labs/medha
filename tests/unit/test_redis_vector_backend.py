@@ -529,3 +529,92 @@ async def test_search_by_normalized_question_not_found(redis_backend):
     result = await b.search_by_normalized_question(COLL, "nothing")
 
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# load_stats / save_stats
+# ---------------------------------------------------------------------------
+
+
+def test_stats_key_is_sanitised_and_outside_the_index_prefix():
+    """The stats key must not fall under the RediSearch hash prefix."""
+    from medha.backends.redis_vector import _key_prefix, _stats_key
+
+    assert _stats_key("medha", "my_cache") == "medha:__stats:my_cache"
+    # Unsafe characters folded exactly as for the data keys
+    assert _stats_key("medha", "My Cache!") == "medha:__stats:my_cache"
+    # Never picked up by the index defined on "{prefix}:{collection}:"
+    assert not _stats_key("medha", "my_cache").startswith(
+        _key_prefix("medha", "my_cache") + ":"
+    )
+
+
+async def test_save_stats_sets_plain_string_key(redis_backend):
+    from medha.types import PersistedStats
+
+    b, ft, pipe, client = redis_backend
+
+    await b.save_stats(COLL, PersistedStats(total_requests=10, total_misses=4))
+
+    client.set.assert_awaited_once()
+    key, payload = client.set.call_args.args
+    assert key == f"medha:__stats:{COLL}"
+    assert PersistedStats.model_validate_json(payload).total_misses == 4
+    # A string key, not a hash — hset is never used for stats
+    pipe.hset.assert_not_called()
+
+
+async def test_load_stats_returns_parsed_snapshot(redis_backend):
+    from medha.types import PersistedStats
+
+    b, ft, pipe, client = redis_backend
+    stats = PersistedStats(total_requests=3, hits_by_strategy={"l1": 3})
+    # redis-py returns bytes unless decode_responses is set
+    client.get = AsyncMock(return_value=stats.model_dump_json().encode())
+
+    loaded = await b.load_stats(COLL)
+
+    assert loaded is not None
+    assert loaded.total_requests == 3
+    assert loaded.hits_by_strategy == {"l1": 3}
+    assert client.get.call_args.args[0] == f"medha:__stats:{COLL}"
+
+
+async def test_load_stats_returns_none_when_absent(redis_backend):
+    b, ft, pipe, client = redis_backend
+    client.get = AsyncMock(return_value=None)
+
+    assert await b.load_stats(COLL) is None
+
+
+async def test_load_stats_wraps_errors(redis_backend):
+    b, ft, pipe, client = redis_backend
+    client.get = AsyncMock(side_effect=RuntimeError("boom"))
+
+    with pytest.raises(StorageError, match="load_stats failed"):
+        await b.load_stats(COLL)
+
+
+async def test_save_stats_wraps_errors(redis_backend):
+    from medha.types import PersistedStats
+
+    b, ft, pipe, client = redis_backend
+    client.set = AsyncMock(side_effect=RuntimeError("boom"))
+
+    with pytest.raises(StorageError, match="save_stats failed"):
+        await b.save_stats(COLL, PersistedStats())
+
+
+async def test_stats_methods_require_connection():
+    from medha.backends.redis_vector import RedisVectorBackend
+    from medha.types import PersistedStats
+
+    b = RedisVectorBackend.__new__(RedisVectorBackend)
+    b._client = None
+    b._settings = _redis_settings()
+
+    with pytest.raises(StorageError, match="connect()"):
+        await b.load_stats(COLL)
+
+    with pytest.raises(StorageError, match="connect()"):
+        await b.save_stats(COLL, PersistedStats())

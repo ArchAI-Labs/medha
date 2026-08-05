@@ -27,6 +27,25 @@ def _decode_vector(s: str) -> list[float]:
     return [float(x) for x in s.strip("[]").split(",")]
 
 
+def _validate_vc_lists(vc_lists: Any) -> list[int]:
+    """Validate ``vc_lists`` before it is interpolated into the vchordrq DDL.
+
+    ``vc_lists`` is embedded into ``CREATE INDEX ... WITH (lists = '...')`` as a
+    JSON literal. From :class:`Settings` it is already typed ``list[int]``, but
+    the ``initialize(..., vc_lists=...)`` kwargs path bypasses Pydantic, so we
+    reject anything that is not a list/tuple of plain integers. ``bool`` is an
+    ``int`` subclass and is excluded; an empty list is allowed (vchordrq
+    accepts it).
+    """
+    if not isinstance(vc_lists, (list, tuple)) or any(
+        not isinstance(n, int) or isinstance(n, bool) for n in vc_lists
+    ):
+        raise StorageInitializationError(
+            f"vc_lists must be a list of integers, got: {vc_lists!r}"
+        )
+    return list(vc_lists)
+
+
 class VectorChordBackend(_AsyncpgBackendMixin, VectorStorageBackend):
     """PostgreSQL + VectorChord backend using vchordrq index with RaBitQ quantization.
 
@@ -84,7 +103,7 @@ class VectorChordBackend(_AsyncpgBackendMixin, VectorStorageBackend):
         schema = self._settings.pg_schema
         table = self._table_name(collection_name)
 
-        vc_lists = kwargs.get("vc_lists", self._settings.vc_lists)
+        vc_lists = _validate_vc_lists(kwargs.get("vc_lists", self._settings.vc_lists))
         vc_residual = kwargs.get("vc_residual_quantization", self._settings.vc_residual_quantization)
 
         lists_sql = json.dumps(vc_lists)
@@ -133,6 +152,8 @@ class VectorChordBackend(_AsyncpgBackendMixin, VectorStorageBackend):
                         ON {schema}.{table} (expires_at)
                         WHERE expires_at IS NOT NULL
                 """)
+
+                await conn.execute(self._stats_table_ddl())
 
         except asyncpg.PostgresError as e:
             raise StorageInitializationError(

@@ -6,12 +6,12 @@ Medha exposes hit/miss counters, per-strategy breakdowns, and latency percentile
 
 ## `CacheStats` Fields
 
-Retrieve statistics with `get_stats()`:
+Retrieve statistics with `stats()`:
 
 ```python
 async with Medha("demo", embedder=embedder, settings=settings) as cache:
     # ... store and search calls ...
-    stats = await cache.get_stats()
+    stats = await cache.stats()
 ```
 
 | Field | Type | Description |
@@ -23,7 +23,7 @@ async with Medha("demo", embedder=embedder, settings=settings) as cache:
 | `p50_latency_ms` | `float` | Median search latency |
 | `p95_latency_ms` | `float` | 95th-percentile search latency |
 | `p99_latency_ms` | `float` | 99th-percentile search latency |
-| `by_strategy` | `dict[SearchStrategy, StrategyStats]` | Per-tier breakdown |
+| `by_strategy` | `dict[str, StrategyStats]` | Per-tier breakdown, keyed by strategy value |
 
 ---
 
@@ -40,7 +40,7 @@ A hit rate of 0.8 means 80% of LLM calls were avoided.
 Search latency is tracked per request. Percentiles are computed over a rolling window:
 
 ```python
-stats = await cache.get_stats()
+stats = await cache.stats()
 print(f"P50: {stats.p50_latency_ms:.1f} ms")
 print(f"P95: {stats.p95_latency_ms:.1f} ms")
 print(f"P99: {stats.p99_latency_ms:.1f} ms")
@@ -59,25 +59,74 @@ Expected ranges (in-memory backend, FastEmbed):
 
 ## Per-Strategy Breakdown
 
-`stats.by_strategy` maps each `SearchStrategy` to a `StrategyStats` object:
+`stats.by_strategy` maps each strategy **value** (a `str`, e.g. `"l1_cache"` — not the `SearchStrategy` member itself) to a `StrategyStats` object:
 
 ```python
-from medha.types import SearchStrategy
-
-stats = await cache.get_stats()
+stats = await cache.stats()
 for strategy, s in stats.by_strategy.items():
-    print(f"{strategy.name}: hits={s.hits}, avg={s.avg_latency_ms:.1f} ms")
+    print(f"{strategy}: hits={s.count}, avg={s.avg_latency_ms:.1f} ms")
 ```
+
+`StrategyStats` carries `count` and `total_latency_ms`, plus a computed `avg_latency_ms` property.
 
 Output example:
 
 ```
-L1_CACHE: hits=142, avg=0.08 ms
-TEMPLATE_MATCH: hits=38, avg=2.1 ms
-EXACT_VECTOR_MATCH: hits=21, avg=8.3 ms
-SEMANTIC_MATCH: hits=64, avg=11.2 ms
-FUZZY_MATCH: hits=5, avg=31.4 ms
+l1_cache: hits=142, avg=0.08 ms
+template_match: hits=38, avg=2.1 ms
+exact_vector_match: hits=21, avg=8.3 ms
+semantic_match: hits=64, avg=11.2 ms
+fuzzy_match: hits=5, avg=31.4 ms
 ```
+
+---
+
+## Persistent Statistics
+
+!!! info "New in 0.5.0"
+
+`CacheStats` is a per-process accumulator: without persistence, every restart resets the hit rate to zero. Since 0.5.0 Medha writes a `PersistedStats` snapshot into the backend every `stats_persist_interval` requests and reloads it on `start()`, so the counters describe the cache's whole history rather than the current process's uptime.
+
+```python
+settings = Settings(
+    backend_type="lancedb",
+    stats_persist_interval=100,   # flush every 100 requests (default)
+)
+
+async with Medha("demo", embedder=embedder, settings=settings) as cache:
+    stats = await cache.stats()
+    print(stats.total_requests, stats.hit_rate)   # includes previous runs
+```
+
+What is stored:
+
+| Field | Description |
+|---|---|
+| `total_requests` | Every `search()` call |
+| `total_hits` / `total_misses` / `total_errors` | Outcome counters |
+| `hits_by_strategy` | Per-tier hit counts (`l1_cache`, `semantic_match`, …) |
+| `last_reset_at` / `updated_at` | Timezone-aware UTC timestamps |
+| `hit_rate` / `miss_rate` | Computed properties |
+
+**Latency percentiles are not persisted.** They are sampled per process and merging them across restarts would be misleading, so after a restart latency describes the current process while the counters describe everything.
+
+### Tuning the interval
+
+Each flush is one small write. The interval trades write frequency against how many requests you lose on an unclean shutdown.
+
+| `stats_persist_interval` | Write frequency | Worst-case loss |
+|---|---|---|
+| `1` | Every request | 0 requests |
+| `100` *(default)* | Every 100 requests | Up to 99 |
+| `1000` | Every 1000 requests | Up to 999 |
+
+Writes run in a background task and are best-effort: a failure is logged and never propagates to the `search()` call that scheduled it. Persistence is skipped entirely when `collect_stats=False`.
+
+### Backend support
+
+All ten built-in backends implement `load_stats()` / `save_stats()`. On `VectorStorageBackend` the two methods are **not** abstract — they default to `return None` and a no-op, so a custom backend written against 0.4.x keeps working and simply opts out of stats persistence.
+
+The `medha stats` CLI command reports the persisted snapshot; see the [CLI guide](cli.md).
 
 ---
 

@@ -19,6 +19,30 @@ class StrategyStats(BaseModel):
         return self.total_latency_ms / self.count if self.count > 0 else 0.0
 
 
+class PersistedStats(BaseModel):
+    """Snapshot of cache performance metrics stored in the backend.
+
+    Persisted after every Settings.stats_persist_interval requests.
+    Loaded on start() so metrics survive process restarts.
+    """
+
+    total_requests: int = 0
+    total_hits: int = 0
+    total_misses: int = 0
+    total_errors: int = 0
+    hits_by_strategy: dict[str, int] = Field(default_factory=dict)
+    last_reset_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    @property
+    def hit_rate(self) -> float:
+        return self.total_hits / self.total_requests if self.total_requests else 0.0
+
+    @property
+    def miss_rate(self) -> float:
+        return self.total_misses / self.total_requests if self.total_requests else 0.0
+
+
 class CacheStats(BaseModel):
     """Snapshot of cache performance metrics."""
 

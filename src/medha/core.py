@@ -22,7 +22,16 @@ from medha.exceptions import ConfigurationError, EmbeddingError, MedhaError, Sto
 from medha.interfaces.embedder import BaseEmbedder
 from medha.interfaces.l1_cache import L1CacheBackend
 from medha.interfaces.storage import VectorStorageBackend
-from medha.types import CacheEntry, CacheHit, CacheResult, CacheStats, QueryTemplate, SearchStrategy, StrategyStats
+from medha.types import (
+    CacheEntry,
+    CacheHit,
+    CacheResult,
+    CacheStats,
+    PersistedStats,
+    QueryTemplate,
+    SearchStrategy,
+    StrategyStats,
+)
 from medha.utils.nlp import ParameterExtractor, keyword_overlap_score
 from medha.utils.normalization import normalize_question, query_hash, question_hash
 
@@ -115,6 +124,48 @@ class _StatsCollector:
         async with self._lock:
             self._reset_state()
 
+    def load_persisted(self, persisted: PersistedStats) -> None:
+        """Seed the accumulators from a snapshot previously saved in the backend.
+
+        Intended for a freshly constructed collector (called from start()): the
+        counters are replaced, not merged.  Latency samples are not persisted,
+        so restored per-strategy entries start with a total latency of zero and
+        their averages only reflect requests served by the current process.
+
+        Synchronous on purpose — it contains no await points, so it cannot
+        interleave with record()/snapshot() and does not need the lock.
+        """
+        self._total_requests = persisted.total_requests
+        self._total_hits = persisted.total_hits
+        self._total_misses = persisted.total_misses
+        self._total_errors = persisted.total_errors
+        self._by_strategy = {
+            strategy: {"count": int(count), "total_latency_ms": 0.0}
+            for strategy, count in persisted.hits_by_strategy.items()
+        }
+        self._since = persisted.last_reset_at
+
+    def build_persisted(self) -> PersistedStats:
+        """Return a persistable snapshot of the current accumulators.
+
+        Only hit strategies are reported in ``hits_by_strategy``; misses and
+        errors are already carried by their own totals.  Synchronous for the
+        same reason as load_persisted().
+        """
+        hit_keys = {s.value for s in _HIT_STRATEGIES}
+        return PersistedStats(
+            total_requests=self._total_requests,
+            total_hits=self._total_hits,
+            total_misses=self._total_misses,
+            total_errors=self._total_errors,
+            hits_by_strategy={
+                key: int(value["count"])
+                for key, value in self._by_strategy.items()
+                if key in hit_keys
+            },
+            last_reset_at=self._since,
+        )
+
 
 class Medha:
     """Semantic Memory for AI Text-to-Query systems.
@@ -195,6 +246,12 @@ class Medha:
         self._warm_loaded = 0
         self._cleanup_task: asyncio.Task[None] | None = None
         self._known_collections = [self._collection_name]
+
+        # Stats persistence: request counter + strong refs to in-flight save
+        # tasks (asyncio only keeps weak references, so an unreferenced task
+        # can be garbage collected mid-flight).
+        self._request_count: int = 0
+        self._stats_persist_tasks: set[asyncio.Task[None]] = set()
 
     # --- Private helpers ---
 
@@ -308,6 +365,19 @@ class Medha:
                     f"Set Settings(validate_on_start=False) to skip this check."
                 ) from exc
 
+        if self._settings.collect_stats:
+            try:
+                persisted = await self._backend.load_stats(self._collection_name)
+                if persisted is not None:
+                    self._load_persisted_stats(persisted)
+                    logger.info(
+                        "Loaded persisted stats: %d requests, %d hits",
+                        persisted.total_requests,
+                        persisted.total_hits,
+                    )
+            except StorageError as exc:
+                logger.warning("Could not load persisted stats: %s", exc)
+
         if self._settings.cleanup_interval_seconds:
             self._cleanup_task = asyncio.create_task(self._cleanup_loop())
 
@@ -324,6 +394,8 @@ class Medha:
             with suppress(asyncio.CancelledError):
                 await self._cleanup_task
             self._cleanup_task = None
+        if self._settings.collect_stats and self._request_count > 0:
+            await self._flush_stats()
         if self._settings.embedding_cache_path:
             self._save_embedding_cache_to_disk()
         await self._l1_backend.close()
@@ -362,10 +434,21 @@ class Medha:
             CacheHit with the matched query, confidence, and strategy.
             Returns CacheHit(strategy=NO_MATCH) if no tier matches.
         """
+        self._request_count += 1
         t0 = time.monotonic()
         result = await self._search_impl(question)
         latency_ms = (time.monotonic() - t0) * 1000
         await self._stats.record(result.strategy, latency_ms)
+
+        if (
+            self._settings.collect_stats
+            and self._settings.stats_persist_interval > 0
+            and self._request_count % self._settings.stats_persist_interval == 0
+        ):
+            task = asyncio.create_task(self._persist_stats_task())
+            self._stats_persist_tasks.add(task)
+            task.add_done_callback(self._stats_persist_tasks.discard)
+
         return result
 
     async def search_batch(
@@ -632,29 +715,84 @@ class Medha:
             )
         return None
 
+    def _apply_feedback_boost(
+        self,
+        score: float,
+        feedback_correct: int,
+        feedback_incorrect: int,
+    ) -> float:
+        """Adjust a similarity score upward based on accumulated positive feedback.
+
+        trust    = feedback_correct / (feedback_correct + feedback_incorrect)
+        adjusted = min(1.0, score * (1 + feedback_boost_factor * trust))
+
+        Entries with only negative feedback (trust == 0) and entries with no
+        feedback at all are returned unchanged: the boost never penalises, it
+        only rewards.  Returns ``score`` untouched when the feature is disabled
+        (feedback_boost_factor == 0.0, the default).
+        """
+        if self._settings.feedback_boost_factor == 0.0:
+            return score
+        total = feedback_correct + feedback_incorrect
+        if total == 0:
+            return score
+        trust = feedback_correct / total
+        boosted = score * (1.0 + self._settings.feedback_boost_factor * trust)
+        return min(1.0, boosted)
+
     async def _search_semantic(self, embedding: list[float], collection_name: str | None = None) -> CacheHit | None:
         """Search for semantic similarity (score >= score_threshold_semantic).
 
         Uses settings.score_threshold_semantic (default 0.90).
         Returns the top-1 result with a slight confidence penalty (0.9x).
+
+        When Settings.feedback_boost_factor > 0, candidates are re-ranked by
+        their feedback-adjusted score, so a slightly less similar entry with a
+        strong positive track record can outrank a closer one.
         """
+        threshold = self._settings.score_threshold_semantic
+        boost_factor = self._settings.feedback_boost_factor
+
+        # With boosting on, retrieve below the threshold so that well-rated
+        # entries can still be rescued.  The largest possible multiplier is
+        # (1 + boost_factor), so nothing scoring under threshold/(1 + factor)
+        # can reach the threshold however good its feedback is.
+        retrieval_threshold = threshold / (1.0 + boost_factor) if boost_factor else threshold
+
         results = await self._backend.search(
             collection_name=collection_name or self._collection_name,
             vector=embedding,
             limit=3,
-            score_threshold=self._settings.score_threshold_semantic,
+            score_threshold=retrieval_threshold,
         )
-        if results:
-            r = results[0]
-            return CacheHit(
-                generated_query=r.generated_query,
-                response_summary=r.response_summary,
-                confidence=r.score * 0.9,  # Penalize slightly
-                strategy=SearchStrategy.SEMANTIC_MATCH,
-                template_used=r.template_id,
-                expires_at=r.expires_at,
-            )
-        return None
+        if not results:
+            return None
+
+        best: CacheResult | None
+        if boost_factor == 0.0:
+            # Untouched 0.4.3 path: backends return results by descending score.
+            best, best_score = results[0], results[0].score
+        else:
+            best = None
+            best_score = 0.0
+            for r in results:
+                adjusted = self._apply_feedback_boost(r.score, r.feedback_correct, r.feedback_incorrect)
+                if adjusted >= threshold and (best is None or adjusted > best_score):
+                    best, best_score = r, adjusted
+
+        # Unreachable in the boost_factor == 0.0 branch (results is non-empty),
+        # but hoisting the guard here keeps the type narrowed for both paths.
+        if best is None:
+            return None
+
+        return CacheHit(
+            generated_query=best.generated_query,
+            response_summary=best.response_summary,
+            confidence=best_score * 0.9,  # Penalize slightly
+            strategy=SearchStrategy.SEMANTIC_MATCH,
+            template_used=best.template_id,
+            expires_at=best.expires_at,
+        )
 
     async def _search_fuzzy(
         self, question: str, embedding: list[float] | None = None, collection_name: str | None = None
@@ -678,11 +816,19 @@ class Medha:
 
         coll = collection_name or self._collection_name
         normalized = normalize_question(question)
-        threshold = self._settings.score_threshold_fuzzy
+        # Ratios are normalised to 0..1 here so that the feedback boost (which
+        # clamps at 1.0) operates on the same scale as the semantic tier.
+        threshold = self._settings.score_threshold_fuzzy / 100.0
+
+        def _score(candidate: CacheResult) -> float:
+            ratio = fuzz.ratio(normalized, candidate.normalized_question) / 100.0
+            return self._apply_feedback_boost(
+                ratio, candidate.feedback_correct, candidate.feedback_incorrect
+            )
 
         best_match: CacheResult | None = None
         best_score = 0.0
-        early_exit_score = 99.0
+        early_exit_score = 0.99
 
         if embedding is not None:
             # Fast path: vector pre-filter → fuzzy only on top-K candidates
@@ -699,7 +845,7 @@ class Medha:
                 self._settings.fuzzy_prefilter_top_k,
             )
             for r in candidates:
-                score = fuzz.ratio(normalized, r.normalized_question)
+                score = _score(r)
                 if score > best_score and score >= threshold:
                     best_score = score
                     best_match = r
@@ -716,7 +862,7 @@ class Medha:
                     offset=offset,
                 )
                 for r in results:
-                    score = fuzz.ratio(normalized, r.normalized_question)
+                    score = _score(r)
                     if score > best_score and score >= threshold:
                         best_score = score
                         best_match = r
@@ -730,7 +876,7 @@ class Medha:
             return CacheHit(
                 generated_query=best_match.generated_query,
                 response_summary=best_match.response_summary,
-                confidence=best_score / 100.0,
+                confidence=best_score,
                 strategy=SearchStrategy.FUZZY_MATCH,
                 template_used=best_match.template_id,
                 expires_at=best_match.expires_at,
@@ -1696,6 +1842,41 @@ class Medha:
     async def reset_stats(self) -> None:
         """Reset all collected statistics to zero."""
         await self._stats.reset()
+
+    def _load_persisted_stats(self, persisted: PersistedStats) -> None:
+        """Copy counts from a backend snapshot into the in-memory accumulators."""
+        self._stats.load_persisted(persisted)
+
+    def _build_persisted_stats(self) -> PersistedStats:
+        """Build a persistable snapshot from the in-memory accumulators."""
+        return self._stats.build_persisted()
+
+    async def _persist_stats_task(self) -> None:
+        """Write the current stats snapshot to the backend (fire-and-forget).
+
+        Never raises: stats persistence is best-effort and must not affect the
+        search path that scheduled it.
+        """
+        try:
+            snapshot = self._build_persisted_stats()
+            await self._backend.save_stats(self._collection_name, snapshot)
+        except Exception as exc:
+            logger.warning("Could not persist stats: %s", exc)
+
+    async def _flush_stats(self) -> None:
+        """Drain in-flight snapshots and write a final one, before shutdown.
+
+        search() only schedules a snapshot every stats_persist_interval
+        requests, so a process that stops between two boundaries would lose
+        everything since the last one — with the default interval of 100, a
+        short-lived or low-traffic process would persist nothing at all.
+
+        Called by close() *before* the backend is closed, so both the drained
+        tasks and the final write still have a live connection.
+        """
+        if self._stats_persist_tasks:
+            await asyncio.gather(*self._stats_persist_tasks, return_exceptions=True)
+        await self._persist_stats_task()
 
     async def clear_caches(self) -> None:
         """Clear all caches (L1, embedding). Backend data is preserved."""
