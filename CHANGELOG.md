@@ -68,6 +68,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Feedback counters are now readable on every backend.** `update_feedback()`
+  wrote `feedback_correct` / `feedback_incorrect`, but only `InMemoryBackend`
+  read them back into `CacheResult`; the other nine left both at `0`. As a
+  result `feedback_boost_factor` computed `trust` over two zeros and silently
+  did nothing outside the in-memory backend. All ten backends now round-trip the
+  counters through both `upsert()` and every read path (`search`, `scroll`,
+  `search_by_query_hash`, `search_by_normalized_question`).
+
+  Two backends could not even store the counters and raised on `feedback()`
+  rather than degrading quietly:
+
+    - **`PgVectorBackend` / `VectorChordBackend`**: the `feedback_correct` and
+      `feedback_incorrect` columns were absent from `CREATE TABLE`, so
+      `update_feedback()` failed with an undefined-column error. Both are now in
+      the DDL, and `initialize()` issues `ADD COLUMN IF NOT EXISTS` so tables
+      created by an earlier version are migrated in place on next start. Existing
+      rows backfill to `0`.
+    - **`AzureSearchBackend`**: the two fields were missing from the index
+      schema, so the `merge_or_upload_documents` call in `update_feedback()` was
+      rejected. They are now declared as filterable `Int32` fields. **An index
+      created by an earlier version must be recreated** — Azure AI Search cannot
+      add fields to a live index.
+
+  `WeaviateBackend` gains the two `INT` properties and `LanceDBBackend` the two
+  `int64` Arrow fields; `ElasticsearchBackend` declares them explicitly in the
+  mapping instead of relying on dynamic mapping. Backends whose storage is
+  schemaless (Qdrant payload, Chroma metadata, Redis hash) needed no schema
+  change, only the read path.
+
+  Regression coverage: `tests/unit/test_feedback_roundtrip.py` asserts the
+  mapper of every backend propagates both counters, and the
+  `test_feedback_boost_e2e.py` suite now runs each scenario against a real
+  vector engine (Qdrant `:memory:`) as well as the in-memory backend — the
+  memory-only suite reported the feature as working while it was inert
+  everywhere else.
+
+- **`CacheResult(vector=...)`**: `ElasticsearchBackend` and `AzureSearchBackend`
+  passed a `vector` keyword that `CacheResult` does not define. Pydantic ignored
+  it, so the argument was dead code; it has been removed.
+
 - **Documentation**: the observability and getting-started guides called a
   non-existent `get_stats()` method — the accessor is `stats()`. The per-strategy
   snippet also used `strategy.name` and `s.hits`; `by_strategy` is keyed by the

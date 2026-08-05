@@ -313,6 +313,8 @@ class QdrantBackend(VectorStorageBackend):
                         response_summary=payload.get("response_summary"),
                         template_id=payload.get("template_id"),
                         usage_count=payload.get("usage_count", 0),
+                        feedback_correct=payload.get("feedback_correct", 0),
+                        feedback_incorrect=payload.get("feedback_incorrect", 0),
                         created_at=payload.get("created_at"),
                     )
                 )
@@ -438,6 +440,8 @@ class QdrantBackend(VectorStorageBackend):
                 response_summary=payload.get("response_summary"),
                 template_id=payload.get("template_id"),
                 usage_count=payload.get("usage_count", 0),
+                feedback_correct=payload.get("feedback_correct", 0),
+                feedback_incorrect=payload.get("feedback_incorrect", 0),
                 created_at=payload.get("created_at"),
             )
         except StorageError:
@@ -571,6 +575,8 @@ class QdrantBackend(VectorStorageBackend):
                 response_summary=payload.get("response_summary"),
                 template_id=payload.get("template_id"),
                 usage_count=payload.get("usage_count", 0),
+                feedback_correct=payload.get("feedback_correct", 0),
+                feedback_incorrect=payload.get("feedback_incorrect", 0),
                 created_at=payload.get("created_at"),
             )
         except StorageError:
@@ -858,6 +864,8 @@ class QdrantBackend(VectorStorageBackend):
             response_summary=payload.get("response_summary"),
             template_id=payload.get("template_id"),
             usage_count=payload.get("usage_count", 0),
+            feedback_correct=payload.get("feedback_correct", 0),
+            feedback_incorrect=payload.get("feedback_incorrect", 0),
             created_at=payload.get("created_at"),
             expires_at=expires_at,
         )
@@ -876,6 +884,8 @@ class QdrantBackend(VectorStorageBackend):
                 "response_summary": entry.response_summary,
                 "template_id": entry.template_id,
                 "usage_count": entry.usage_count,
+                "feedback_correct": entry.feedback_correct,
+                "feedback_incorrect": entry.feedback_incorrect,
                 "created_at": entry.created_at.isoformat(),
                 "expires_at": entry.expires_at.isoformat() if entry.expires_at else None,
             },

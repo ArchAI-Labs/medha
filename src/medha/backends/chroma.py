@@ -52,6 +52,8 @@ def _entry_to_metadata(entry: CacheEntry) -> dict[str, Any]:
         "response_summary": entry.response_summary or "",
         "template_id": entry.template_id or "",
         "usage_count": entry.usage_count,
+        "feedback_correct": entry.feedback_correct,
+        "feedback_incorrect": entry.feedback_incorrect,
         "created_at": entry.created_at.isoformat() if entry.created_at else "",
         "expires_at": entry.expires_at.isoformat() if entry.expires_at else "",
     }
@@ -80,6 +82,8 @@ def _meta_to_result(id_: str, score: float, meta: dict[str, Any]) -> CacheResult
         response_summary=meta.get("response_summary") or None,
         template_id=meta.get("template_id") or None,
         usage_count=int(meta.get("usage_count", 0)),
+        feedback_correct=int(meta.get("feedback_correct") or 0),
+        feedback_incorrect=int(meta.get("feedback_incorrect") or 0),
         created_at=created_at,
         expires_at=expires_at,
     )

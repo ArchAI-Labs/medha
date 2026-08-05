@@ -37,6 +37,7 @@ except ImportError:
 _SCALAR_FIELDS = [
     "id", "original_question", "normalized_question", "generated_query",
     "query_hash", "response_summary", "template_id", "usage_count",
+    "feedback_correct", "feedback_incorrect",
     "created_at", "expires_at",
 ]
 
@@ -94,9 +95,10 @@ def _doc_to_result(doc: dict[str, Any], score: float) -> CacheResult:
         response_summary=doc.get("response_summary"),
         template_id=doc.get("template_id"),
         usage_count=doc.get("usage_count", 1),
+        feedback_correct=doc.get("feedback_correct") or 0,
+        feedback_incorrect=doc.get("feedback_incorrect") or 0,
         created_at=_parse_dt(doc.get("created_at")),
         expires_at=_parse_dt(doc.get("expires_at")),
-        vector=doc.get("vector"),
     )
 
 
@@ -110,6 +112,8 @@ def _entry_to_doc(entry: CacheEntry) -> dict[str, Any]:
         "response_summary": entry.response_summary,
         "template_id": entry.template_id,
         "usage_count": entry.usage_count,
+        "feedback_correct": entry.feedback_correct,
+        "feedback_incorrect": entry.feedback_incorrect,
         "created_at": _dt_to_iso(entry.created_at),
         "vector": entry.vector,
     }
@@ -210,6 +214,8 @@ class AzureSearchBackend(VectorStorageBackend):
                 SimpleField(name="response_summary", type=SearchFieldDataType.String, nullable=True),
                 SimpleField(name="template_id", type=SearchFieldDataType.String, filterable=True, nullable=True),
                 SimpleField(name="usage_count", type=SearchFieldDataType.Int32, filterable=True),
+                SimpleField(name="feedback_correct", type=SearchFieldDataType.Int32, filterable=True),
+                SimpleField(name="feedback_incorrect", type=SearchFieldDataType.Int32, filterable=True),
                 SimpleField(name="created_at", type=SearchFieldDataType.DateTimeOffset, filterable=True, sortable=True),
                 SimpleField(name="expires_at", type=SearchFieldDataType.DateTimeOffset, filterable=True, nullable=True),
                 SearchField(

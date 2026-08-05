@@ -123,9 +123,21 @@ class VectorChordBackend(_AsyncpgBackendMixin, VectorStorageBackend):
                         response_summary     TEXT,
                         template_id          TEXT,
                         usage_count          INTEGER NOT NULL DEFAULT 1,
+                        feedback_correct     INTEGER NOT NULL DEFAULT 0,
+                        feedback_incorrect   INTEGER NOT NULL DEFAULT 0,
                         created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                         expires_at           TIMESTAMPTZ
                     )
+                """)
+
+                # Tables created before 0.5.0 lack the feedback counters.
+                await conn.execute(f"""
+                    ALTER TABLE {schema}.{table}
+                        ADD COLUMN IF NOT EXISTS feedback_correct INTEGER NOT NULL DEFAULT 0
+                """)
+                await conn.execute(f"""
+                    ALTER TABLE {schema}.{table}
+                        ADD COLUMN IF NOT EXISTS feedback_incorrect INTEGER NOT NULL DEFAULT 0
                 """)
 
                 residual_str = "true" if vc_residual else "false"
@@ -185,6 +197,8 @@ class VectorChordBackend(_AsyncpgBackendMixin, VectorStorageBackend):
                 response_summary,
                 template_id,
                 usage_count,
+                feedback_correct,
+                feedback_incorrect,
                 created_at,
                 expires_at,
                 (1 - (vector <=> $1::vector))::float AS score
@@ -215,9 +229,10 @@ class VectorChordBackend(_AsyncpgBackendMixin, VectorStorageBackend):
             INSERT INTO {schema}.{table} (
                 id, vector, original_question, normalized_question,
                 generated_query, query_hash, response_summary,
-                template_id, usage_count, created_at, expires_at
+                template_id, usage_count, feedback_correct, feedback_incorrect,
+                created_at, expires_at
             )
-            VALUES ($1, $2::vector, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            VALUES ($1, $2::vector, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             ON CONFLICT (id) DO UPDATE SET
                 vector              = EXCLUDED.vector,
                 original_question   = EXCLUDED.original_question,
@@ -227,6 +242,8 @@ class VectorChordBackend(_AsyncpgBackendMixin, VectorStorageBackend):
                 response_summary    = EXCLUDED.response_summary,
                 template_id         = EXCLUDED.template_id,
                 usage_count         = EXCLUDED.usage_count,
+                feedback_correct    = EXCLUDED.feedback_correct,
+                feedback_incorrect  = EXCLUDED.feedback_incorrect,
                 created_at          = EXCLUDED.created_at,
                 expires_at          = EXCLUDED.expires_at
         """
@@ -243,6 +260,8 @@ class VectorChordBackend(_AsyncpgBackendMixin, VectorStorageBackend):
                         entry.response_summary,
                         entry.template_id,
                         entry.usage_count,
+                        entry.feedback_correct,
+                        entry.feedback_incorrect,
                         entry.created_at,
                         entry.expires_at,
                     )

@@ -58,6 +58,8 @@ def _entry_to_properties(entry: CacheEntry) -> dict[str, Any]:
         "response_summary": entry.response_summary or "",
         "template_id": entry.template_id or "",
         "usage_count": entry.usage_count,
+        "feedback_correct": entry.feedback_correct,
+        "feedback_incorrect": entry.feedback_incorrect,
         "created_at": entry.created_at,
         "expires_at": entry.expires_at,
     }
@@ -75,6 +77,8 @@ def _obj_to_result(obj: Any, score: float) -> CacheResult:
         response_summary=props.get("response_summary") or None,
         template_id=props.get("template_id") or None,
         usage_count=int(props.get("usage_count", 0)),
+        feedback_correct=int(props.get("feedback_correct") or 0),
+        feedback_incorrect=int(props.get("feedback_incorrect") or 0),
         created_at=props.get("created_at"),
         expires_at=props.get("expires_at"),
     )
@@ -154,6 +158,8 @@ class WeaviateBackend(VectorStorageBackend):
                     wvc.config.Property(name="response_summary", data_type=wvc.config.DataType.TEXT),
                     wvc.config.Property(name="template_id", data_type=wvc.config.DataType.TEXT),
                     wvc.config.Property(name="usage_count", data_type=wvc.config.DataType.INT),
+                    wvc.config.Property(name="feedback_correct", data_type=wvc.config.DataType.INT),
+                    wvc.config.Property(name="feedback_incorrect", data_type=wvc.config.DataType.INT),
                     wvc.config.Property(name="created_at", data_type=wvc.config.DataType.DATE),
                     wvc.config.Property(name="expires_at", data_type=wvc.config.DataType.DATE),
                 ],

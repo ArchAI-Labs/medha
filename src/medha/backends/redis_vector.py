@@ -90,6 +90,8 @@ def _doc_to_result(doc: Any, score: float) -> CacheResult:
         response_summary=_get("response_summary") or None,
         template_id=_get("template_id") or None,
         usage_count=int(_get("usage_count", 0)),
+        feedback_correct=int(_get("feedback_correct", 0) or 0),
+        feedback_incorrect=int(_get("feedback_incorrect", 0) or 0),
         created_at=created_at,
         expires_at=expires_at,
     )
@@ -235,7 +237,8 @@ class RedisVectorBackend(VectorStorageBackend):
                 .return_fields(
                     "original_question", "normalized_question", "generated_query",
                     "query_hash", "response_summary", "template_id",
-                    "usage_count", "created_at", "expires_at", "__score",
+                    "usage_count", "feedback_correct", "feedback_incorrect",
+                    "created_at", "expires_at", "__score",
                 )
                 .paging(0, limit)
                 .dialect(2)
@@ -287,6 +290,8 @@ class RedisVectorBackend(VectorStorageBackend):
                     "response_summary": entry.response_summary or "",
                     "template_id": entry.template_id or "",
                     "usage_count": entry.usage_count,
+                    "feedback_correct": entry.feedback_correct,
+                    "feedback_incorrect": entry.feedback_incorrect,
                     "created_at": created_at,
                     "expires_at": expires_at,
                     "vector": vec_bytes,
@@ -310,7 +315,8 @@ class RedisVectorBackend(VectorStorageBackend):
         return_fields = [
             "original_question", "normalized_question", "generated_query",
             "query_hash", "response_summary", "template_id",
-            "usage_count", "created_at", "expires_at",
+            "usage_count", "feedback_correct", "feedback_incorrect",
+            "created_at", "expires_at",
         ]
         if with_vectors:
             return_fields.append("vector")
@@ -367,7 +373,8 @@ class RedisVectorBackend(VectorStorageBackend):
                 .return_fields(
                     "original_question", "normalized_question", "generated_query",
                     "query_hash", "response_summary", "template_id",
-                    "usage_count", "created_at", "expires_at",
+                    "usage_count", "feedback_correct", "feedback_incorrect",
+                    "created_at", "expires_at",
                 )
                 .paging(0, 1)
                 .dialect(2)
@@ -441,7 +448,8 @@ class RedisVectorBackend(VectorStorageBackend):
                 .return_fields(
                     "original_question", "normalized_question", "generated_query",
                     "query_hash", "response_summary", "template_id",
-                    "usage_count", "created_at", "expires_at",
+                    "usage_count", "feedback_correct", "feedback_incorrect",
+                    "created_at", "expires_at",
                 )
                 .paging(0, 1)
                 .dialect(2)

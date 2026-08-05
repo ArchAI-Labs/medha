@@ -30,6 +30,8 @@ def _row_to_cache_result(row: Any, score: float | None = None) -> CacheResult:
         response_summary=row.get("response_summary"),
         template_id=row.get("template_id"),
         usage_count=row.get("usage_count", 0),
+        feedback_correct=row.get("feedback_correct") or 0,
+        feedback_incorrect=row.get("feedback_incorrect") or 0,
         created_at=row.get("created_at"),
         expires_at=row.get("expires_at"),
     )
@@ -126,7 +128,8 @@ class _AsyncpgBackendMixin:
         vector_col = ", vector" if with_vectors else ""
         sql = f"""
             SELECT id::text, original_question, normalized_question, generated_query,
-                   query_hash, response_summary, template_id, usage_count, created_at{vector_col}
+                   query_hash, response_summary, template_id, usage_count,
+                   feedback_correct, feedback_incorrect, created_at{vector_col}
             FROM {schema}.{table}
             ORDER BY created_at ASC, id ASC
             LIMIT $1 OFFSET $2
@@ -185,7 +188,8 @@ class _AsyncpgBackendMixin:
 
         sql = f"""
             SELECT id::text, original_question, normalized_question, generated_query,
-                   query_hash, response_summary, template_id, usage_count, created_at
+                   query_hash, response_summary, template_id, usage_count,
+                   feedback_correct, feedback_incorrect, created_at
             FROM {schema}.{table}
             WHERE query_hash = $1
             LIMIT 1
@@ -304,7 +308,8 @@ class _AsyncpgBackendMixin:
         table = self._table_name(collection_name)
         sql = f"""
             SELECT id::text, original_question, normalized_question, generated_query,
-                   query_hash, response_summary, template_id, usage_count, created_at, expires_at
+                   query_hash, response_summary, template_id, usage_count,
+                   feedback_correct, feedback_incorrect, created_at, expires_at
             FROM {schema}.{table}
             WHERE normalized_question = $1
             LIMIT 1

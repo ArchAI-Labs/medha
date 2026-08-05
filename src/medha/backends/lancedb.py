@@ -41,6 +41,8 @@ def _build_schema(dimension: int) -> "pa.Schema":
         pa.field("response_summary", pa.string()),
         pa.field("template_id", pa.string()),
         pa.field("usage_count", pa.int64()),
+        pa.field("feedback_correct", pa.int64()),
+        pa.field("feedback_incorrect", pa.int64()),
         pa.field("created_at", pa.string()),
         pa.field("expires_at", pa.string()),
     ])
@@ -57,6 +59,8 @@ def _entry_to_row(entry: CacheEntry) -> dict[str, Any]:
         "response_summary": entry.response_summary or "",
         "template_id": entry.template_id or "",
         "usage_count": entry.usage_count,
+        "feedback_correct": entry.feedback_correct,
+        "feedback_incorrect": entry.feedback_incorrect,
         "created_at": entry.created_at.isoformat() if entry.created_at else "",
         "expires_at": entry.expires_at.isoformat() if entry.expires_at else "",
     }
@@ -85,6 +89,8 @@ def _row_to_result(row: dict[str, Any], score: float) -> CacheResult:
         response_summary=row.get("response_summary") or None,
         template_id=row.get("template_id") or None,
         usage_count=int(row.get("usage_count", 0)),
+        feedback_correct=int(row.get("feedback_correct") or 0),
+        feedback_incorrect=int(row.get("feedback_incorrect") or 0),
         created_at=created_at,
         expires_at=expires_at,
     )
@@ -333,6 +339,7 @@ class LanceDBBackend(VectorStorageBackend):
         columns = None if with_vectors else [
             "id", "original_question", "normalized_question", "generated_query",
             "query_hash", "response_summary", "template_id", "usage_count",
+            "feedback_correct", "feedback_incorrect",
             "created_at", "expires_at",
         ]
         try:
