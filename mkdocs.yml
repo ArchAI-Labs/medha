@@ -98,8 +98,6 @@ nav:
       - Invalidation: user_guide/invalidation.md
       - Feedback Loop: user_guide/feedback.md
       - Batch Operations: user_guide/batch_operations.md
-      - Feedback Loop: user_guide/feedback.md
-      - CLI: user_guide/cli.md
       - Observability: user_guide/observability.md
       - CLI: user_guide/cli.md
       - Framework Integrations: user_guide/framework_integrations.md
