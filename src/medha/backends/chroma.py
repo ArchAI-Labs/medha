@@ -1,10 +1,12 @@
 """ChromaBackend — Chroma vector storage backend."""
 
 import asyncio
+import contextlib
 import logging
 import re
+from collections.abc import Callable
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Any
 
 from medha.exceptions import ConfigurationError, StorageError, StorageInitializationError
 from medha.interfaces.storage import VectorStorageBackend
@@ -62,16 +64,12 @@ def _entry_to_metadata(entry: CacheEntry) -> dict[str, Any]:
 def _meta_to_result(id_: str, score: float, meta: dict[str, Any]) -> CacheResult:
     expires_at = None
     if meta.get("expires_at"):
-        try:
+        with contextlib.suppress(ValueError, TypeError):
             expires_at = datetime.fromisoformat(meta["expires_at"])
-        except (ValueError, TypeError):
-            pass
     created_at = None
     if meta.get("created_at"):
-        try:
+        with contextlib.suppress(ValueError, TypeError):
             created_at = datetime.fromisoformat(meta["created_at"])
-        except (ValueError, TypeError):
-            pass
     return CacheResult(
         id=id_,
         score=max(0.0, min(1.0, score)),
@@ -194,7 +192,7 @@ class ChromaBackend(VectorStorageBackend):
         distances = result["distances"][0]
         metadatas = result["metadatas"][0]
         out = []
-        for id_, dist, meta in zip(ids, distances, metadatas):
+        for id_, dist, meta in zip(ids, distances, metadatas, strict=False):
             score = 1.0 - dist
             if score >= score_threshold:
                 out.append(_meta_to_result(id_, score, meta))
@@ -234,7 +232,7 @@ class ChromaBackend(VectorStorageBackend):
 
         ids: list[str] = result.get("ids", [])
         metadatas: list[dict[str, Any]] = result.get("metadatas", [])
-        cache_results = [_meta_to_result(id_, 1.0, meta) for id_, meta in zip(ids, metadatas)]
+        cache_results = [_meta_to_result(id_, 1.0, meta) for id_, meta in zip(ids, metadatas, strict=False)]
         next_offset = str(int_offset + len(ids)) if len(ids) == limit else None
         return cache_results, next_offset
 
@@ -445,10 +443,8 @@ class ChromaBackend(VectorStorageBackend):
 
     async def close(self) -> None:
         if self._is_async and self._client is not None:
-            try:
+            with contextlib.suppress(Exception):
                 await self._client.aclose()
-            except Exception:
-                pass
         self._client = None
         self._collections.clear()
         self._meta_collections.clear()

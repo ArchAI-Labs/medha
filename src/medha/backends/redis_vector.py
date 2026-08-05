@@ -1,5 +1,6 @@
 """RedisVectorBackend — Redis Stack (RediSearch) vector storage backend."""
 
+import contextlib
 import logging
 import re
 import time
@@ -12,7 +13,10 @@ from medha.types import CacheEntry, CacheResult, PersistedStats
 logger = logging.getLogger(__name__)
 
 try:
-    import numpy as np
+    # Imported here purely as an availability check: the methods that encode
+    # vectors import numpy locally, but HAS_REDIS must be False when it is
+    # missing, or the backend fails later with an opaque NameError.
+    import numpy as np  # noqa: F401
     import redis.asyncio as aioredis
     from redis.asyncio import Redis, Sentinel
     from redis.commands.search.field import (
@@ -553,8 +557,6 @@ class RedisVectorBackend(VectorStorageBackend):
 
     async def close(self) -> None:
         if self._client is not None:
-            try:
+            with contextlib.suppress(Exception):
                 await self._client.aclose()
-            except Exception:
-                pass
         self._client = None

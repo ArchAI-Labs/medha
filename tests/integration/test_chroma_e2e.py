@@ -12,7 +12,6 @@ from medha.config import Settings
 from medha.core import Medha
 from medha.types import SearchStrategy
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -223,6 +222,7 @@ class TestContextManager:
 class TestTTL:
     async def test_expired_entry_excluded_from_search(self, mock_embedder):
         from datetime import datetime, timedelta, timezone
+
         from tests.conftest import make_entry
 
         settings = Settings(chroma_mode="ephemeral")
@@ -254,8 +254,9 @@ class TestTTL:
 
     async def test_find_expired_returns_expired_ids(self, mock_embedder):
         from datetime import datetime, timedelta, timezone
-        from tests.conftest import make_entry
+
         from medha.types import CacheEntry
+        from tests.conftest import make_entry
 
         settings = Settings(chroma_mode="ephemeral")
         b = ChromaBackend(settings)

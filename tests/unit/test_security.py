@@ -3,15 +3,12 @@
 from __future__ import annotations
 
 import json
-import os
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from medha.config import Settings
 from medha.types import SearchStrategy
-
 
 # ---------------------------------------------------------------------------
 # Helpers

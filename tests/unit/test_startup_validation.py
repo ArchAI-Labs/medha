@@ -1,7 +1,8 @@
 """Unit tests for Settings.validate_on_start and the start() connectivity probe."""
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from medha.config import Settings
 from medha.core import Medha

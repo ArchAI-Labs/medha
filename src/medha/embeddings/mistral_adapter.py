@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Generator
+from collections.abc import Generator
+from typing import Any
 
 from medha.config import Settings
 from medha.exceptions import EmbeddingError
@@ -23,8 +24,11 @@ class MistralAdapter(BaseEmbedder):
     def __init__(self, settings: Settings) -> None:
         try:
             from mistralai import Mistral
-        except ImportError:
-            raise ImportError("pip install 'medha-archai[mistral]'")
+        except ImportError as exc:
+            raise ImportError(
+                "MistralAdapter requires the [mistral] extra, which is not installed.\n"
+                'Install it with:  pip install "medha-archai[mistral]"'
+            ) from exc
 
         self._model: str = settings.mistral_model
         self._batch_size: int = settings.mistral_batch_size
@@ -53,9 +57,11 @@ class MistralAdapter(BaseEmbedder):
                 model=self._model, inputs=[text]
             )
             vec = result.data[0].embedding
+            if vec is None:
+                raise EmbeddingError("Mistral returned an empty embedding")
             self._dimension = len(vec)
-            return vec
-        except RuntimeError:
+            return list(vec)
+        except (RuntimeError, EmbeddingError):
             raise
         except Exception as e:
             logger.error("MistralAdapter aembed failed: %s", e)
@@ -71,11 +77,14 @@ class MistralAdapter(BaseEmbedder):
                 resp = await self._client.embeddings.create_async(
                     model=self._model, inputs=chunk
                 )
-                results.extend(item.embedding for item in resp.data)
+                for item in resp.data:
+                    if item.embedding is None:
+                        raise EmbeddingError("Mistral returned an empty embedding")
+                    results.append(list(item.embedding))
             if results and self._dimension is None:
                 self._dimension = len(results[0])
             return results
-        except RuntimeError:
+        except (RuntimeError, EmbeddingError):
             raise
         except Exception as e:
             logger.error("MistralAdapter aembed_batch failed: %s", e)

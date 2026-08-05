@@ -38,21 +38,19 @@ class TestCohereAdapterDimension:
     def test_dimension_raises_before_any_embed_call(self):
         mock_cohere = MagicMock()
         mock_cohere.AsyncClientV2.return_value = MagicMock()
-        with patch.object(cohere_mod, "HAS_COHERE", True):
-            with patch.object(cohere_mod, "cohere", mock_cohere):
-                adapter = CohereAdapter(api_key="test")
-                with pytest.raises(RuntimeError, match="Dimension not available"):
-                    _ = adapter.dimension
+        with patch.object(cohere_mod, "HAS_COHERE", True), patch.object(cohere_mod, "cohere", mock_cohere):
+            adapter = CohereAdapter(api_key="test")
+            with pytest.raises(RuntimeError, match="Dimension not available"):
+                _ = adapter.dimension
 
     async def test_dimension_returns_value_after_aembed(self):
         mock_client = _make_mock_cohere_client([[0.1, 0.2, 0.3]])
         mock_cohere = MagicMock()
         mock_cohere.AsyncClientV2.return_value = mock_client
-        with patch.object(cohere_mod, "HAS_COHERE", True):
-            with patch.object(cohere_mod, "cohere", mock_cohere):
-                adapter = CohereAdapter(api_key="test")
-                await adapter.aembed("hello")
-                assert adapter.dimension == 3
+        with patch.object(cohere_mod, "HAS_COHERE", True), patch.object(cohere_mod, "cohere", mock_cohere):
+            adapter = CohereAdapter(api_key="test")
+            await adapter.aembed("hello")
+            assert adapter.dimension == 3
 
 
 class TestCohereAdapterAembed:
@@ -60,10 +58,9 @@ class TestCohereAdapterAembed:
         mock_client = _make_mock_cohere_client([[0.1, 0.2]])
         mock_cohere = MagicMock()
         mock_cohere.AsyncClientV2.return_value = mock_client
-        with patch.object(cohere_mod, "HAS_COHERE", True):
-            with patch.object(cohere_mod, "cohere", mock_cohere):
-                adapter = CohereAdapter(api_key="test", input_type_query="search_query")
-                result = await adapter.aembed("hello world")
+        with patch.object(cohere_mod, "HAS_COHERE", True), patch.object(cohere_mod, "cohere", mock_cohere):
+            adapter = CohereAdapter(api_key="test", input_type_query="search_query")
+            result = await adapter.aembed("hello world")
 
         mock_client.embed.assert_called_once()
         call_kwargs = mock_client.embed.call_args.kwargs
@@ -74,11 +71,10 @@ class TestCohereAdapterAembed:
         mock_client = _make_mock_cohere_client([[0.1, 0.2, 0.3, 0.4]])
         mock_cohere = MagicMock()
         mock_cohere.AsyncClientV2.return_value = mock_client
-        with patch.object(cohere_mod, "HAS_COHERE", True):
-            with patch.object(cohere_mod, "cohere", mock_cohere):
-                adapter = CohereAdapter(api_key="test")
-                await adapter.aembed("test")
-                assert adapter.dimension == 4
+        with patch.object(cohere_mod, "HAS_COHERE", True), patch.object(cohere_mod, "cohere", mock_cohere):
+            adapter = CohereAdapter(api_key="test")
+            await adapter.aembed("test")
+            assert adapter.dimension == 4
 
 
 class TestCohereAdapterAembedBatch:
@@ -86,10 +82,9 @@ class TestCohereAdapterAembedBatch:
         mock_client = _make_mock_cohere_client([[0.1, 0.2], [0.3, 0.4]])
         mock_cohere = MagicMock()
         mock_cohere.AsyncClientV2.return_value = mock_client
-        with patch.object(cohere_mod, "HAS_COHERE", True):
-            with patch.object(cohere_mod, "cohere", mock_cohere):
-                adapter = CohereAdapter(api_key="test", input_type_query="search_query")
-                await adapter.aembed_batch(["a", "b"])
+        with patch.object(cohere_mod, "HAS_COHERE", True), patch.object(cohere_mod, "cohere", mock_cohere):
+            adapter = CohereAdapter(api_key="test", input_type_query="search_query")
+            await adapter.aembed_batch(["a", "b"])
 
         call_kwargs = mock_client.embed.call_args.kwargs
         assert call_kwargs["input_type"] == "search_query"
@@ -98,14 +93,13 @@ class TestCohereAdapterAembedBatch:
         mock_client = _make_mock_cohere_client([[0.1, 0.2], [0.3, 0.4]])
         mock_cohere = MagicMock()
         mock_cohere.AsyncClientV2.return_value = mock_client
-        with patch.object(cohere_mod, "HAS_COHERE", True):
-            with patch.object(cohere_mod, "cohere", mock_cohere):
-                adapter = CohereAdapter(
-                    api_key="test",
-                    input_type_query="search_query",
-                    input_type_document="search_document",
-                )
-                await adapter.aembed_batch(["a", "b"], is_document=True)
+        with patch.object(cohere_mod, "HAS_COHERE", True), patch.object(cohere_mod, "cohere", mock_cohere):
+            adapter = CohereAdapter(
+                api_key="test",
+                input_type_query="search_query",
+                input_type_document="search_document",
+            )
+            await adapter.aembed_batch(["a", "b"], is_document=True)
 
         call_kwargs = mock_client.embed.call_args.kwargs
         assert call_kwargs["input_type"] == "search_document"
@@ -115,9 +109,8 @@ class TestCohereAdapterAembedBatch:
         mock_client = _make_mock_cohere_client(expected)
         mock_cohere = MagicMock()
         mock_cohere.AsyncClientV2.return_value = mock_client
-        with patch.object(cohere_mod, "HAS_COHERE", True):
-            with patch.object(cohere_mod, "cohere", mock_cohere):
-                adapter = CohereAdapter(api_key="test")
-                result = await adapter.aembed_batch(["a", "b"])
+        with patch.object(cohere_mod, "HAS_COHERE", True), patch.object(cohere_mod, "cohere", mock_cohere):
+            adapter = CohereAdapter(api_key="test")
+            result = await adapter.aembed_batch(["a", "b"])
 
         assert result == expected

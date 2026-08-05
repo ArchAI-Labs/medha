@@ -7,7 +7,6 @@ from medha.config import Settings
 from medha.core import Medha
 from medha.types import SearchStrategy
 
-
 # ---------------------------------------------------------------------------
 # Shared fixture
 # ---------------------------------------------------------------------------

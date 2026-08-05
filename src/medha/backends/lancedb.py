@@ -1,5 +1,6 @@
 """LanceDBBackend — LanceDB vector storage backend."""
 
+import contextlib
 import logging
 from datetime import datetime, timezone
 from typing import Any
@@ -69,16 +70,12 @@ def _entry_to_row(entry: CacheEntry) -> dict[str, Any]:
 def _row_to_result(row: dict[str, Any], score: float) -> CacheResult:
     expires_at = None
     if row.get("expires_at"):
-        try:
+        with contextlib.suppress(ValueError, TypeError):
             expires_at = datetime.fromisoformat(row["expires_at"])
-        except (ValueError, TypeError):
-            pass
     created_at = None
     if row.get("created_at"):
-        try:
+        with contextlib.suppress(ValueError, TypeError):
             created_at = datetime.fromisoformat(row["created_at"])
-        except (ValueError, TypeError):
-            pass
     return CacheResult(
         id=row["id"],
         score=max(0.0, min(1.0, score)),

@@ -15,8 +15,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-_UNSET = object()
-
 from medha.config import Settings
 from medha.exceptions import ConfigurationError, EmbeddingError, MedhaError, StorageError, TemplateError
 from medha.interfaces.embedder import BaseEmbedder
@@ -36,6 +34,9 @@ from medha.utils.nlp import ParameterExtractor, keyword_overlap_score
 from medha.utils.normalization import normalize_question, query_hash, question_hash
 
 logger = logging.getLogger(__name__)
+
+# Sentinel for optional arguments where None is a meaningful value.
+_UNSET = object()
 
 _HIT_STRATEGIES = frozenset({
     SearchStrategy.L1_CACHE,
@@ -472,7 +473,7 @@ class Medha:
             return [CacheHit(strategy=SearchStrategy.ERROR)] * len(questions)
         tasks = [
             self._waterfall_search(q, v, collection)
-            for q, v in zip(questions, vectors)
+            for q, v in zip(questions, vectors, strict=False)
         ]
         results = await asyncio.gather(*tasks, return_exceptions=False)
         return list(results)
@@ -1258,7 +1259,10 @@ class Medha:
         return True
 
     async def _cleanup_loop(self) -> None:
+        # start() only spawns this task when the interval is set and non-zero.
         interval = self._settings.cleanup_interval_seconds
+        if not interval:
+            return
         while True:
             await asyncio.sleep(interval)
             try:

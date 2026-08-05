@@ -7,7 +7,6 @@ import pytest
 from medha.backends.memory import InMemoryBackend
 from medha.config import Settings
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------

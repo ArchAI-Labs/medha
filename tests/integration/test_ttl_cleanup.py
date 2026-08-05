@@ -1,6 +1,5 @@
 """Integration tests for automatic TTL cleanup via start()/close()."""
 
-import asyncio
 
 import pytest
 

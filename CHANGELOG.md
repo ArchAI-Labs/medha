@@ -108,6 +108,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   passed a `vector` keyword that `CacheResult` does not define. Pydantic ignored
   it, so the argument was dead code; it has been removed.
 
+- **`[redis]` extra was missing `numpy`**: `RedisVectorBackend` encodes vectors
+  with `np.array(...).tobytes()` and gates `HAS_REDIS` on importing numpy, but
+  the extra installed only `redis[hiredis]`. `pip install "medha-archai[redis]"`
+  therefore produced a backend that refused to start with *"redis backend
+  requires 'redis[hiredis]>=4.6'. Install with: pip install
+  medha-archai[redis]"* — telling the user to install what they had just
+  installed. numpy is now declared in the extra.
+
+- **Missing-extra errors now name the extra.** Previously:
+
+    - `from medha.backends import QdrantBackend` raised `ImportError: cannot
+      import name 'QdrantBackend' from 'medha.backends'`, which does not say
+      what to install. `medha.backends` and `medha.embeddings` now raise an
+      `ImportError` naming the exact extra and `pip install` command.
+    - The `medha` console script failed with a bare `ModuleNotFoundError: No
+      module named 'typer'`; it now reports that the `[cli]` extra is required.
+    - `medha.embeddings` additionally exposes the adapter classes directly, so
+      `from medha.embeddings import FastEmbedAdapter` works alongside the
+      existing `get_fastembed_adapter()` accessors.
+
+- **`QdrantBackend` import guard**: `medha.backends.qdrant` was the only backend
+  that imported its driver unconditionally, so `import`ing the module without
+  `qdrant-client` raised `ModuleNotFoundError` instead of the
+  `ConfigurationError` with an install hint that the other nine backends raise.
+  It now follows the same pattern.
+
+- **`MistralAdapter`**: `aembed()` / `aembed_batch()` assumed
+  `data[i].embedding` is never `None` (the SDK types it as optional). A `None`
+  surfaced as a confusing `TypeError` wrapped in `EmbeddingError`; it now raises
+  `EmbeddingError("Mistral returned an empty embedding")` directly.
+
+### Changed
+
+- **Lint and type-check hygiene**: `ruff check src tests` is now clean (it
+  previously reported 364 findings). Intentional patterns — conditional
+  re-exports in `__init__.py`, Typer's `Argument()`/`Option()` defaults, nested
+  `with patch(...)` in tests — are documented per-file ignores rather than
+  silenced globally. Exception chaining (`raise ... from`) was added throughout
+  the CLI so tracebacks identify the original error.
+
+- **CI** no longer skips `tests/unit/test_gemini_adapter.py`. The exclusion note
+  claimed the tests were not green; they pass, and they need no Gemini SDK
+  installed because the adapter's import is guarded and the tests mock it.
+
 - **Documentation**: the observability and getting-started guides called a
   non-existent `get_stats()` method — the accessor is `stats()`. The per-strategy
   snippet also used `strategy.name` and `s.hits`; `by_strategy` is keyed by the

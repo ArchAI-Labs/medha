@@ -21,10 +21,10 @@ try:
     from azure.search.documents.indexes.aio import SearchIndexClient as AsyncSearchIndexClient
     from azure.search.documents.indexes.models import (
         HnswAlgorithmConfiguration,
+        SearchableField,
         SearchField,
         SearchFieldDataType,
         SearchIndex,
-        SearchableField,
         SimpleField,
         VectorSearch,
         VectorSearchProfile,

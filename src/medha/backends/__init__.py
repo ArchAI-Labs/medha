@@ -1,5 +1,7 @@
 """Vector storage backend implementations."""
 
+from typing import Any
+
 from medha.backends.memory import InMemoryBackend
 
 try:
@@ -59,3 +61,28 @@ except ImportError:
     pass
 
 __all__ = ["InMemoryBackend"] + (["QdrantBackend"] if HAS_QDRANT else []) + _all_extra
+
+# Backend name -> extra that provides its driver. Used to turn the default
+# "cannot import name 'QdrantBackend'" into something actionable.
+_BACKEND_EXTRAS = {
+    "QdrantBackend": "qdrant",
+    "PgVectorBackend": "pgvector",
+    "ElasticsearchBackend": "elasticsearch",
+    "VectorChordBackend": "vectorchord",
+    "ChromaBackend": "chroma",
+    "WeaviateBackend": "weaviate",
+    "RedisVectorBackend": "redis",
+    "AzureSearchBackend": "azure-search",
+    "LanceDBBackend": "lancedb",
+}
+
+
+def __getattr__(name: str) -> Any:
+    """Explain which extra to install for a backend whose driver is missing."""
+    extra = _BACKEND_EXTRAS.get(name)
+    if extra is not None:
+        raise ImportError(
+            f"{name} requires the [{extra}] extra, which is not installed.\n"
+            f'Install it with:  pip install "medha-archai[{extra}]"'
+        )
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

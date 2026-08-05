@@ -1,5 +1,6 @@
 """WeaviateBackend — Weaviate v4 vector storage backend."""
 
+import contextlib
 import logging
 from datetime import datetime, timezone
 from typing import Any
@@ -465,9 +466,7 @@ class WeaviateBackend(VectorStorageBackend):
 
     async def close(self) -> None:
         if self._client is not None:
-            try:
+            with contextlib.suppress(Exception):
                 await self._client.close()
-            except Exception:
-                pass
         self._client = None
         self._collections.clear()

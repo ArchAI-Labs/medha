@@ -53,11 +53,8 @@ jobs:
         run: python -m compileall -q src tests
 
       - name: Run no-service tests
-        # The Gemini adapter tests currently mock a provider-specific API shape;
-        # keep this first CI baseline focused on checks that are green today.
         run: >
           pytest tests/unit tests/integration
-          --ignore=tests/unit/test_gemini_adapter.py
           -m "not slow and not pgvector and not vectorchord and not elasticsearch and not redis and not azure_search"
 
   package:

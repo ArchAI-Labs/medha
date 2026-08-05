@@ -188,7 +188,10 @@ class Settings(BaseSettings):
     # --- Chroma ---
     chroma_mode: Literal["ephemeral", "persistent", "http"] = Field(
         default="ephemeral",
-        description="Chroma connection mode: 'ephemeral' (in-memory), 'persistent' (local disk), 'http' (remote server).",
+        description=(
+            "Chroma connection mode: 'ephemeral' (in-memory), "
+            "'persistent' (local disk), 'http' (remote server)."
+        ),
     )
     chroma_host: str = Field(default="localhost", description="Chroma server host (http mode)")
     chroma_port: int = Field(default=8000, ge=1, le=65535, description="Chroma server port (http mode)")
@@ -381,7 +384,10 @@ class Settings(BaseSettings):
 
     # --- Batch operations ---
     batch_size: int = Field(default=100, ge=1, le=10000, description="Batch size for bulk upsert")
-    batch_embed_concurrency: int = Field(default=1, ge=1, le=10, description="Chunk di embedding processati concorrentemente in store_many().")
+    batch_embed_concurrency: int = Field(
+        default=1, ge=1, le=10,
+        description="Embedding chunks processed concurrently in store_many().",
+    )
 
     # --- Observability ---
     collect_stats: bool = Field(
