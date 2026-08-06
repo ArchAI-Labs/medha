@@ -1,6 +1,5 @@
 """Unit tests for Medha.search_batch() and search_batch_sync()."""
 
-import pytest
 
 from medha.core import Medha
 from medha.types import CacheHit

@@ -1,10 +1,12 @@
 """ChromaBackend — Chroma vector storage backend."""
 
 import asyncio
+import contextlib
 import logging
 import re
+from collections.abc import Callable
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Any
 
 from medha.exceptions import ConfigurationError, StorageError, StorageInitializationError
 from medha.interfaces.storage import VectorStorageBackend
@@ -52,6 +54,8 @@ def _entry_to_metadata(entry: CacheEntry) -> dict[str, Any]:
         "response_summary": entry.response_summary or "",
         "template_id": entry.template_id or "",
         "usage_count": entry.usage_count,
+        "feedback_correct": entry.feedback_correct,
+        "feedback_incorrect": entry.feedback_incorrect,
         "created_at": entry.created_at.isoformat() if entry.created_at else "",
         "expires_at": entry.expires_at.isoformat() if entry.expires_at else "",
     }
@@ -60,16 +64,12 @@ def _entry_to_metadata(entry: CacheEntry) -> dict[str, Any]:
 def _meta_to_result(id_: str, score: float, meta: dict[str, Any]) -> CacheResult:
     expires_at = None
     if meta.get("expires_at"):
-        try:
+        with contextlib.suppress(ValueError, TypeError):
             expires_at = datetime.fromisoformat(meta["expires_at"])
-        except (ValueError, TypeError):
-            pass
     created_at = None
     if meta.get("created_at"):
-        try:
+        with contextlib.suppress(ValueError, TypeError):
             created_at = datetime.fromisoformat(meta["created_at"])
-        except (ValueError, TypeError):
-            pass
     return CacheResult(
         id=id_,
         score=max(0.0, min(1.0, score)),
@@ -80,6 +80,8 @@ def _meta_to_result(id_: str, score: float, meta: dict[str, Any]) -> CacheResult
         response_summary=meta.get("response_summary") or None,
         template_id=meta.get("template_id") or None,
         usage_count=int(meta.get("usage_count", 0)),
+        feedback_correct=int(meta.get("feedback_correct") or 0),
+        feedback_incorrect=int(meta.get("feedback_incorrect") or 0),
         created_at=created_at,
         expires_at=expires_at,
     )
@@ -190,7 +192,7 @@ class ChromaBackend(VectorStorageBackend):
         distances = result["distances"][0]
         metadatas = result["metadatas"][0]
         out = []
-        for id_, dist, meta in zip(ids, distances, metadatas):
+        for id_, dist, meta in zip(ids, distances, metadatas, strict=False):
             score = 1.0 - dist
             if score >= score_threshold:
                 out.append(_meta_to_result(id_, score, meta))
@@ -230,7 +232,7 @@ class ChromaBackend(VectorStorageBackend):
 
         ids: list[str] = result.get("ids", [])
         metadatas: list[dict[str, Any]] = result.get("metadatas", [])
-        cache_results = [_meta_to_result(id_, 1.0, meta) for id_, meta in zip(ids, metadatas)]
+        cache_results = [_meta_to_result(id_, 1.0, meta) for id_, meta in zip(ids, metadatas, strict=False)]
         next_offset = str(int_offset + len(ids)) if len(ids) == limit else None
         return cache_results, next_offset
 
@@ -441,10 +443,8 @@ class ChromaBackend(VectorStorageBackend):
 
     async def close(self) -> None:
         if self._is_async and self._client is not None:
-            try:
+            with contextlib.suppress(Exception):
                 await self._client.aclose()
-            except Exception:
-                pass
         self._client = None
         self._collections.clear()
         self._meta_collections.clear()

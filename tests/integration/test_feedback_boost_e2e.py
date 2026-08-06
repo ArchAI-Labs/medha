@@ -50,8 +50,25 @@ class GeometricEmbedder(BaseEmbedder):
         return [await self.aembed(t) for t in texts]
 
 
-async def _make_medha(boost_factor: float) -> Medha:
-    backend = InMemoryBackend()
+@pytest.fixture(params=["memory", "qdrant"])
+def backend_factory(request):
+    """Run every scenario on the in-memory backend and on a real vector engine.
+
+    The counters used to be readable only from InMemoryBackend, so a
+    memory-only suite reported the feature as working while it was inert
+    everywhere else.  Qdrant in ``:memory:`` mode needs no server.
+    """
+    if request.param == "memory":
+        return InMemoryBackend
+
+    pytest.importorskip("qdrant_client")
+    from medha.backends.qdrant import QdrantBackend
+
+    return lambda: QdrantBackend(Settings(qdrant_location=":memory:"))
+
+
+async def _make_medha(backend_factory, boost_factor: float) -> Medha:
+    backend = backend_factory()
     await backend.connect()
     settings = Settings(
         backend_type="memory",
@@ -72,9 +89,9 @@ async def _give_positive_feedback(m: Medha, times: int) -> None:
 
 
 class TestFeedbackBoostE2E:
-    async def test_baseline_score_is_below_threshold(self):
+    async def test_baseline_score_is_below_threshold(self, backend_factory):
         """Without feedback the entry is unreachable — the premise of these tests."""
-        m = await _make_medha(boost_factor=0.0)
+        m = await _make_medha(backend_factory, boost_factor=0.0)
         try:
             await m.store(STORED_QUESTION, STORED_QUERY)
 
@@ -84,8 +101,8 @@ class TestFeedbackBoostE2E:
         finally:
             await m.close()
 
-    async def test_boost_raises_low_score_above_threshold(self):
-        m = await _make_medha(boost_factor=0.5)
+    async def test_boost_raises_low_score_above_threshold(self, backend_factory):
+        m = await _make_medha(backend_factory, boost_factor=0.5)
         try:
             await m.store(STORED_QUESTION, STORED_QUERY)
             await _give_positive_feedback(m, 5)
@@ -98,8 +115,8 @@ class TestFeedbackBoostE2E:
         finally:
             await m.close()
 
-    async def test_no_boost_when_factor_is_zero(self):
-        m = await _make_medha(boost_factor=0.0)
+    async def test_no_boost_when_factor_is_zero(self, backend_factory):
+        m = await _make_medha(backend_factory, boost_factor=0.0)
         try:
             await m.store(STORED_QUESTION, STORED_QUERY)
             await _give_positive_feedback(m, 5)
@@ -110,9 +127,9 @@ class TestFeedbackBoostE2E:
         finally:
             await m.close()
 
-    async def test_boost_too_small_still_misses(self):
+    async def test_boost_too_small_still_misses(self, backend_factory):
         """0.60 * (1 + 0.1) = 0.66 — still short of the 0.85 threshold."""
-        m = await _make_medha(boost_factor=0.1)
+        m = await _make_medha(backend_factory, boost_factor=0.1)
         try:
             await m.store(STORED_QUESTION, STORED_QUERY)
             await _give_positive_feedback(m, 5)
@@ -123,8 +140,8 @@ class TestFeedbackBoostE2E:
         finally:
             await m.close()
 
-    async def test_negative_feedback_does_not_boost(self):
-        m = await _make_medha(boost_factor=0.5)
+    async def test_negative_feedback_does_not_boost(self, backend_factory):
+        m = await _make_medha(backend_factory, boost_factor=0.5)
         try:
             await m.store(STORED_QUESTION, STORED_QUERY)
             for _ in range(5):
@@ -137,9 +154,9 @@ class TestFeedbackBoostE2E:
         finally:
             await m.close()
 
-    async def test_mixed_feedback_scales_the_boost(self):
+    async def test_mixed_feedback_scales_the_boost(self, backend_factory):
         """trust = 3/5 = 0.6 → 0.60 * (1 + 0.5*0.6) = 0.78, still below 0.85."""
-        m = await _make_medha(boost_factor=0.5)
+        m = await _make_medha(backend_factory, boost_factor=0.5)
         try:
             await m.store(STORED_QUESTION, STORED_QUERY)
             for _ in range(3):
@@ -153,9 +170,9 @@ class TestFeedbackBoostE2E:
         finally:
             await m.close()
 
-    async def test_exact_question_still_hits_without_feedback(self):
+    async def test_exact_question_still_hits_without_feedback(self, backend_factory):
         """Boosting must not disturb the tiers above semantic."""
-        m = await _make_medha(boost_factor=0.5)
+        m = await _make_medha(backend_factory, boost_factor=0.5)
         try:
             await m.store(STORED_QUESTION, STORED_QUERY)
 
@@ -166,9 +183,9 @@ class TestFeedbackBoostE2E:
         finally:
             await m.close()
 
-    async def test_unrelated_question_is_never_boosted_into_a_hit(self):
+    async def test_unrelated_question_is_never_boosted_into_a_hit(self, backend_factory):
         """An orthogonal question stays a miss no matter how trusted the entry is."""
-        m = await _make_medha(boost_factor=1.0)
+        m = await _make_medha(backend_factory, boost_factor=1.0)
         try:
             await m.store(STORED_QUESTION, STORED_QUERY)
             await _give_positive_feedback(m, 10)
@@ -179,8 +196,8 @@ class TestFeedbackBoostE2E:
         finally:
             await m.close()
 
-    async def test_confidence_reports_the_boosted_score(self):
-        m = await _make_medha(boost_factor=0.5)
+    async def test_confidence_reports_the_boosted_score(self, backend_factory):
+        m = await _make_medha(backend_factory, boost_factor=0.5)
         try:
             await m.store(STORED_QUESTION, STORED_QUERY)
             await _give_positive_feedback(m, 5)

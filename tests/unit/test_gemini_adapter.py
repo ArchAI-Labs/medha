@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import medha.embeddings.gemini_adapter as gemini_mod
-from medha.embeddings.gemini_adapter import GeminiAdapter, _GEMINI_CHUNK_SIZE
+from medha.embeddings.gemini_adapter import _GEMINI_CHUNK_SIZE, GeminiAdapter
 from medha.exceptions import ConfigurationError
 
 
@@ -52,32 +52,29 @@ class TestGeminiAdapterImportGuard:
 class TestGeminiAdapterDimension:
     def test_dimension_raises_before_any_embed_call(self):
         mock_g = _mock_genai()
-        with patch.object(gemini_mod, "HAS_GEMINI", True):
-            with patch.object(gemini_mod, "genai", mock_g):
-                adapter = GeminiAdapter(api_key="test")
-                with pytest.raises(RuntimeError, match="Dimension not available"):
-                    _ = adapter.dimension
+        with patch.object(gemini_mod, "HAS_GEMINI", True), patch.object(gemini_mod, "genai", mock_g):
+            adapter = GeminiAdapter(api_key="test")
+            with pytest.raises(RuntimeError, match="Dimension not available"):
+                _ = adapter.dimension
 
     async def test_dimension_set_after_aembed(self):
         mock_g = _mock_genai(embed_return=_single_embed_result([0.1, 0.2, 0.3]))
         mock_types = MagicMock()
-        with patch.object(gemini_mod, "HAS_GEMINI", True):
-            with patch.object(gemini_mod, "genai", mock_g):
-                with patch.object(gemini_mod, "genai_types", mock_types):
-                    adapter = GeminiAdapter(api_key="test")
-                    await adapter.aembed("hello")
-                    assert adapter.dimension == 3
+        with patch.object(gemini_mod, "HAS_GEMINI", True), patch.object(gemini_mod, "genai", mock_g):
+            with patch.object(gemini_mod, "genai_types", mock_types):
+                adapter = GeminiAdapter(api_key="test")
+                await adapter.aembed("hello")
+                assert adapter.dimension == 3
 
 
 class TestGeminiAdapterAembed:
     async def test_aembed_uses_query_task_type(self):
         mock_g = _mock_genai(embed_return=_single_embed_result([0.1, 0.2]))
         mock_types = MagicMock()
-        with patch.object(gemini_mod, "HAS_GEMINI", True):
-            with patch.object(gemini_mod, "genai", mock_g):
-                with patch.object(gemini_mod, "genai_types", mock_types):
-                    adapter = GeminiAdapter(api_key="test", task_type_query="RETRIEVAL_QUERY")
-                    result = await adapter.aembed("test query")
+        with patch.object(gemini_mod, "HAS_GEMINI", True), patch.object(gemini_mod, "genai", mock_g):
+            with patch.object(gemini_mod, "genai_types", mock_types):
+                adapter = GeminiAdapter(api_key="test", task_type_query="RETRIEVAL_QUERY")
+                result = await adapter.aembed("test query")
 
         mock_types.EmbedContentConfig.assert_called_once()
         call_kwargs = mock_types.EmbedContentConfig.call_args.kwargs
@@ -89,11 +86,10 @@ class TestGeminiAdapterAembedBatch:
     async def test_aembed_batch_uses_query_task_type_by_default(self):
         mock_g = _mock_genai(embed_return=_make_embed_result([[0.1], [0.2]]))
         mock_types = MagicMock()
-        with patch.object(gemini_mod, "HAS_GEMINI", True):
-            with patch.object(gemini_mod, "genai", mock_g):
-                with patch.object(gemini_mod, "genai_types", mock_types):
-                    adapter = GeminiAdapter(api_key="test", task_type_query="RETRIEVAL_QUERY")
-                    await adapter.aembed_batch(["a", "b"])
+        with patch.object(gemini_mod, "HAS_GEMINI", True), patch.object(gemini_mod, "genai", mock_g):
+            with patch.object(gemini_mod, "genai_types", mock_types):
+                adapter = GeminiAdapter(api_key="test", task_type_query="RETRIEVAL_QUERY")
+                await adapter.aembed_batch(["a", "b"])
 
         call_kwargs = mock_types.EmbedContentConfig.call_args.kwargs
         assert call_kwargs["task_type"] == "RETRIEVAL_QUERY"
@@ -101,15 +97,14 @@ class TestGeminiAdapterAembedBatch:
     async def test_aembed_batch_uses_document_task_type_when_is_document_true(self):
         mock_g = _mock_genai(embed_return=_make_embed_result([[0.1], [0.2]]))
         mock_types = MagicMock()
-        with patch.object(gemini_mod, "HAS_GEMINI", True):
-            with patch.object(gemini_mod, "genai", mock_g):
-                with patch.object(gemini_mod, "genai_types", mock_types):
-                    adapter = GeminiAdapter(
-                        api_key="test",
-                        task_type_query="RETRIEVAL_QUERY",
-                        task_type_document="RETRIEVAL_DOCUMENT",
-                    )
-                    await adapter.aembed_batch(["a", "b"], is_document=True)
+        with patch.object(gemini_mod, "HAS_GEMINI", True), patch.object(gemini_mod, "genai", mock_g):
+            with patch.object(gemini_mod, "genai_types", mock_types):
+                adapter = GeminiAdapter(
+                    api_key="test",
+                    task_type_query="RETRIEVAL_QUERY",
+                    task_type_document="RETRIEVAL_DOCUMENT",
+                )
+                await adapter.aembed_batch(["a", "b"], is_document=True)
 
         call_kwargs = mock_types.EmbedContentConfig.call_args.kwargs
         assert call_kwargs["task_type"] == "RETRIEVAL_DOCUMENT"
@@ -132,11 +127,10 @@ class TestGeminiAdapterAembedBatch:
 
         mock_g = _mock_genai(embed_side_effect=fake_embed)
         mock_types = MagicMock()
-        with patch.object(gemini_mod, "HAS_GEMINI", True):
-            with patch.object(gemini_mod, "genai", mock_g):
-                with patch.object(gemini_mod, "genai_types", mock_types):
-                    adapter = GeminiAdapter(api_key="test")
-                    result = await adapter.aembed_batch(texts)
+        with patch.object(gemini_mod, "HAS_GEMINI", True), patch.object(gemini_mod, "genai", mock_g):
+            with patch.object(gemini_mod, "genai_types", mock_types):
+                adapter = GeminiAdapter(api_key="test")
+                result = await adapter.aembed_batch(texts)
 
         assert call_count == 2
         assert len(result) == total
@@ -144,10 +138,9 @@ class TestGeminiAdapterAembedBatch:
     async def test_aembed_batch_returns_flattened_results(self):
         mock_g = _mock_genai(embed_return=_make_embed_result([[0.1, 0.2], [0.3, 0.4]]))
         mock_types = MagicMock()
-        with patch.object(gemini_mod, "HAS_GEMINI", True):
-            with patch.object(gemini_mod, "genai", mock_g):
-                with patch.object(gemini_mod, "genai_types", mock_types):
-                    adapter = GeminiAdapter(api_key="test")
-                    result = await adapter.aembed_batch(["a", "b"])
+        with patch.object(gemini_mod, "HAS_GEMINI", True), patch.object(gemini_mod, "genai", mock_g):
+            with patch.object(gemini_mod, "genai_types", mock_types):
+                adapter = GeminiAdapter(api_key="test")
+                result = await adapter.aembed_batch(["a", "b"])
 
         assert result == [[0.1, 0.2], [0.3, 0.4]]

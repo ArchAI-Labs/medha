@@ -8,33 +8,40 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, cast
 
-from qdrant_client import AsyncQdrantClient
-from qdrant_client.models import (
-    BinaryQuantization,
-    BinaryQuantizationConfig,
-    DatetimeRange,
-    Distance,
-    FieldCondition,
-    Filter,
-    HnswConfigDiff,
-    MatchValue,
-    OptimizersConfigDiff,
-    PayloadSchemaType,
-    PointIdsList,
-    PointStruct,
-    QuantizationSearchParams,
-    ScalarQuantization,
-    ScalarQuantizationConfig,
-    ScalarType,
-    SearchParams,
-    TextIndexParams,
-    TextIndexType,
-    TokenizerType,
-    VectorParams,
-)
+try:
+    from qdrant_client import AsyncQdrantClient
+    from qdrant_client.models import (
+        BinaryQuantization,
+        BinaryQuantizationConfig,
+        DatetimeRange,
+        Distance,
+        FieldCondition,
+        Filter,
+        HnswConfigDiff,
+        MatchValue,
+        OptimizersConfigDiff,
+        PayloadSchemaType,
+        PointIdsList,
+        PointStruct,
+        QuantizationSearchParams,
+        ScalarQuantization,
+        ScalarQuantizationConfig,
+        ScalarType,
+        SearchParams,
+        TextIndexParams,
+        TextIndexType,
+        TokenizerType,
+        VectorParams,
+    )
+    HAS_QDRANT = True
+except ImportError:
+    # Every name above is used only inside method bodies, and annotations are
+    # lazy (`from __future__ import annotations`), so importing this module
+    # without qdrant-client is safe: __init__ raises ConfigurationError instead.
+    HAS_QDRANT = False
 
 from medha.config import Settings
-from medha.exceptions import StorageError, StorageInitializationError
+from medha.exceptions import ConfigurationError, StorageError, StorageInitializationError
 from medha.interfaces.storage import VectorStorageBackend
 from medha.types import CacheEntry, CacheResult, PersistedStats
 
@@ -67,6 +74,11 @@ class QdrantBackend(VectorStorageBackend):
     """
 
     def __init__(self, settings: Settings | None = None):
+        if not HAS_QDRANT:
+            raise ConfigurationError(
+                "qdrant backend requires 'qdrant-client>=1.9,<2'. "
+                'Install with: pip install "medha-archai[qdrant]"'
+            )
         self._settings = settings or Settings()
         self._client: AsyncQdrantClient | None = None
         self._initialized_collections: set[str] = set()
@@ -313,6 +325,8 @@ class QdrantBackend(VectorStorageBackend):
                         response_summary=payload.get("response_summary"),
                         template_id=payload.get("template_id"),
                         usage_count=payload.get("usage_count", 0),
+                        feedback_correct=payload.get("feedback_correct", 0),
+                        feedback_incorrect=payload.get("feedback_incorrect", 0),
                         created_at=payload.get("created_at"),
                     )
                 )
@@ -438,6 +452,8 @@ class QdrantBackend(VectorStorageBackend):
                 response_summary=payload.get("response_summary"),
                 template_id=payload.get("template_id"),
                 usage_count=payload.get("usage_count", 0),
+                feedback_correct=payload.get("feedback_correct", 0),
+                feedback_incorrect=payload.get("feedback_incorrect", 0),
                 created_at=payload.get("created_at"),
             )
         except StorageError:
@@ -571,6 +587,8 @@ class QdrantBackend(VectorStorageBackend):
                 response_summary=payload.get("response_summary"),
                 template_id=payload.get("template_id"),
                 usage_count=payload.get("usage_count", 0),
+                feedback_correct=payload.get("feedback_correct", 0),
+                feedback_incorrect=payload.get("feedback_incorrect", 0),
                 created_at=payload.get("created_at"),
             )
         except StorageError:
@@ -858,6 +876,8 @@ class QdrantBackend(VectorStorageBackend):
             response_summary=payload.get("response_summary"),
             template_id=payload.get("template_id"),
             usage_count=payload.get("usage_count", 0),
+            feedback_correct=payload.get("feedback_correct", 0),
+            feedback_incorrect=payload.get("feedback_incorrect", 0),
             created_at=payload.get("created_at"),
             expires_at=expires_at,
         )
@@ -876,6 +896,8 @@ class QdrantBackend(VectorStorageBackend):
                 "response_summary": entry.response_summary,
                 "template_id": entry.template_id,
                 "usage_count": entry.usage_count,
+                "feedback_correct": entry.feedback_correct,
+                "feedback_incorrect": entry.feedback_incorrect,
                 "created_at": entry.created_at.isoformat(),
                 "expires_at": entry.expires_at.isoformat() if entry.expires_at else None,
             },

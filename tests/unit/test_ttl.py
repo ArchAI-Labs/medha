@@ -1,6 +1,5 @@
 """Unit tests for TTL (Time-To-Live) cache lifecycle support."""
 
-import asyncio
 import hashlib
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -10,7 +9,6 @@ import pytest
 from medha.backends.memory import InMemoryBackend
 from medha.config import Settings
 from medha.types import CacheEntry
-
 
 # ---------------------------------------------------------------------------
 # Helpers

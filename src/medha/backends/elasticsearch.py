@@ -93,6 +93,8 @@ class ElasticsearchBackend(VectorStorageBackend):
                         "response_summary": {"type": "text"},
                         "template_id": {"type": "keyword"},
                         "usage_count": {"type": "integer"},
+                        "feedback_correct": {"type": "integer"},
+                        "feedback_incorrect": {"type": "integer"},
                         "created_at": {"type": "date"},
                         "expires_at": {"type": "date"},
                     }
@@ -173,6 +175,8 @@ class ElasticsearchBackend(VectorStorageBackend):
                     "response_summary": entry.response_summary,
                     "template_id": entry.template_id,
                     "usage_count": entry.usage_count,
+                    "feedback_correct": entry.feedback_correct,
+                    "feedback_incorrect": entry.feedback_incorrect,
                     "created_at": _dt_to_str(entry.created_at),
                     "vector": entry.vector,
                 }
@@ -501,7 +505,8 @@ def _hit_to_cache_result(doc_id: str, src: dict[str, Any], score: float) -> Cach
         response_summary=src.get("response_summary"),
         template_id=src.get("template_id"),
         usage_count=src.get("usage_count", 1),
+        feedback_correct=src.get("feedback_correct", 0),
+        feedback_incorrect=src.get("feedback_incorrect", 0),
         created_at=_parse_dt(src.get("created_at")),
         expires_at=_parse_dt(src.get("expires_at")),
-        vector=src.get("vector"),
     )

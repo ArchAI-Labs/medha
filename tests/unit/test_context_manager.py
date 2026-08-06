@@ -1,7 +1,8 @@
 """Unit tests for Medha async context manager protocol."""
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from medha.config import Settings
 from medha.core import Medha

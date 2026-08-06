@@ -68,6 +68,90 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Feedback counters are now readable on every backend.** `update_feedback()`
+  wrote `feedback_correct` / `feedback_incorrect`, but only `InMemoryBackend`
+  read them back into `CacheResult`; the other nine left both at `0`. As a
+  result `feedback_boost_factor` computed `trust` over two zeros and silently
+  did nothing outside the in-memory backend. All ten backends now round-trip the
+  counters through both `upsert()` and every read path (`search`, `scroll`,
+  `search_by_query_hash`, `search_by_normalized_question`).
+
+  Two backends could not even store the counters and raised on `feedback()`
+  rather than degrading quietly:
+
+    - **`PgVectorBackend` / `VectorChordBackend`**: the `feedback_correct` and
+      `feedback_incorrect` columns were absent from `CREATE TABLE`, so
+      `update_feedback()` failed with an undefined-column error. Both are now in
+      the DDL, and `initialize()` issues `ADD COLUMN IF NOT EXISTS` so tables
+      created by an earlier version are migrated in place on next start. Existing
+      rows backfill to `0`.
+    - **`AzureSearchBackend`**: the two fields were missing from the index
+      schema, so the `merge_or_upload_documents` call in `update_feedback()` was
+      rejected. They are now declared as filterable `Int32` fields. **An index
+      created by an earlier version must be recreated** — Azure AI Search cannot
+      add fields to a live index.
+
+  `WeaviateBackend` gains the two `INT` properties and `LanceDBBackend` the two
+  `int64` Arrow fields; `ElasticsearchBackend` declares them explicitly in the
+  mapping instead of relying on dynamic mapping. Backends whose storage is
+  schemaless (Qdrant payload, Chroma metadata, Redis hash) needed no schema
+  change, only the read path.
+
+  Regression coverage: `tests/unit/test_feedback_roundtrip.py` asserts the
+  mapper of every backend propagates both counters, and the
+  `test_feedback_boost_e2e.py` suite now runs each scenario against a real
+  vector engine (Qdrant `:memory:`) as well as the in-memory backend — the
+  memory-only suite reported the feature as working while it was inert
+  everywhere else.
+
+- **`CacheResult(vector=...)`**: `ElasticsearchBackend` and `AzureSearchBackend`
+  passed a `vector` keyword that `CacheResult` does not define. Pydantic ignored
+  it, so the argument was dead code; it has been removed.
+
+- **`[redis]` extra was missing `numpy`**: `RedisVectorBackend` encodes vectors
+  with `np.array(...).tobytes()` and gates `HAS_REDIS` on importing numpy, but
+  the extra installed only `redis[hiredis]`. `pip install "medha-archai[redis]"`
+  therefore produced a backend that refused to start with *"redis backend
+  requires 'redis[hiredis]>=4.6'. Install with: pip install
+  medha-archai[redis]"* — telling the user to install what they had just
+  installed. numpy is now declared in the extra.
+
+- **Missing-extra errors now name the extra.** Previously:
+
+    - `from medha.backends import QdrantBackend` raised `ImportError: cannot
+      import name 'QdrantBackend' from 'medha.backends'`, which does not say
+      what to install. `medha.backends` and `medha.embeddings` now raise an
+      `ImportError` naming the exact extra and `pip install` command.
+    - The `medha` console script failed with a bare `ModuleNotFoundError: No
+      module named 'typer'`; it now reports that the `[cli]` extra is required.
+    - `medha.embeddings` additionally exposes the adapter classes directly, so
+      `from medha.embeddings import FastEmbedAdapter` works alongside the
+      existing `get_fastembed_adapter()` accessors.
+
+- **`QdrantBackend` import guard**: `medha.backends.qdrant` was the only backend
+  that imported its driver unconditionally, so `import`ing the module without
+  `qdrant-client` raised `ModuleNotFoundError` instead of the
+  `ConfigurationError` with an install hint that the other nine backends raise.
+  It now follows the same pattern.
+
+- **`MistralAdapter`**: `aembed()` / `aembed_batch()` assumed
+  `data[i].embedding` is never `None` (the SDK types it as optional). A `None`
+  surfaced as a confusing `TypeError` wrapped in `EmbeddingError`; it now raises
+  `EmbeddingError("Mistral returned an empty embedding")` directly.
+
+### Changed
+
+- **Lint and type-check hygiene**: `ruff check src tests` is now clean (it
+  previously reported 364 findings). Intentional patterns — conditional
+  re-exports in `__init__.py`, Typer's `Argument()`/`Option()` defaults, nested
+  `with patch(...)` in tests — are documented per-file ignores rather than
+  silenced globally. Exception chaining (`raise ... from`) was added throughout
+  the CLI so tracebacks identify the original error.
+
+- **CI** no longer skips `tests/unit/test_gemini_adapter.py`. The exclusion note
+  claimed the tests were not green; they pass, and they need no Gemini SDK
+  installed because the adapter's import is guarded and the tests mock it.
+
 - **Documentation**: the observability and getting-started guides called a
   non-existent `get_stats()` method — the accessor is `stats()`. The per-strategy
   snippet also used `strategy.name` and `s.hits`; `by_strategy` is keyed by the

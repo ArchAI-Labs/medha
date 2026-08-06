@@ -109,6 +109,7 @@ def mock_index_client():
 @pytest.fixture
 async def az_backend(mock_search_client, mock_index_client):
     from azure.core.exceptions import ResourceNotFoundError
+
     from medha.backends.azure_search import AzureSearchBackend
 
     # Simulate index not found → triggers create
@@ -157,6 +158,7 @@ async def test_connect_creates_index_client(mock_index_client):
 
 async def test_initialize_creates_index_when_not_found(mock_index_client, mock_search_client):
     from azure.core.exceptions import ResourceNotFoundError
+
     from medha.backends.azure_search import AzureSearchBackend
 
     mock_index_client.get_index.side_effect = ResourceNotFoundError()
@@ -393,6 +395,7 @@ async def test_update_usage_count_unknown_id(az_backend):
 
 async def test_close_closes_all_clients(mock_search_client, mock_index_client):
     from azure.core.exceptions import ResourceNotFoundError
+
     from medha.backends.azure_search import AzureSearchBackend
 
     mock_index_client.get_index.side_effect = ResourceNotFoundError()

@@ -5,15 +5,13 @@ from __future__ import annotations
 import hashlib
 import uuid
 from datetime import datetime, timezone
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from medha.config import Settings
 from medha.exceptions import ConfigurationError
-from medha.types import CacheEntry, CacheResult, SearchStrategy
-
+from medha.types import CacheResult
 
 # ---------------------------------------------------------------------------
 # Helpers / fixtures
@@ -236,9 +234,8 @@ async def test_warm_from_dataframe_with_custom_columns():
 async def test_warm_from_dataframe_without_pandas_raises():
     m, _, _ = _make_medha()
 
-    with patch.dict("sys.modules", {"pandas": None}):
-        with pytest.raises(ConfigurationError, match="pandas"):
-            await m.warm_from_dataframe(MagicMock())
+    with patch.dict("sys.modules", {"pandas": None}), pytest.raises(ConfigurationError, match="pandas"):
+        await m.warm_from_dataframe(MagicMock())
 
 
 # ---------------------------------------------------------------------------
@@ -270,9 +267,8 @@ async def test_export_to_dataframe_returns_all_entries():
 async def test_export_to_dataframe_without_pandas_raises():
     m, _, _ = _make_medha()
 
-    with patch.dict("sys.modules", {"pandas": None}):
-        with pytest.raises(ConfigurationError, match="pandas"):
-            await m.export_to_dataframe()
+    with patch.dict("sys.modules", {"pandas": None}), pytest.raises(ConfigurationError, match="pandas"):
+        await m.export_to_dataframe()
 
 
 # ---------------------------------------------------------------------------

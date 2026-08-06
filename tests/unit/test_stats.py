@@ -4,10 +4,9 @@ import pytest
 
 from medha.config import Settings
 from medha.core import Medha, _StatsCollector
-from medha.types import CacheEntry, CacheResult, CacheStats, SearchStrategy, StrategyStats
 from medha.interfaces.storage import VectorStorageBackend
+from medha.types import CacheEntry, CacheStats, SearchStrategy, StrategyStats
 from tests.conftest import MockEmbedder
-
 
 # ---------------------------------------------------------------------------
 # Minimal mock backend

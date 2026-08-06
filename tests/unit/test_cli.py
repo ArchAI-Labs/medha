@@ -218,9 +218,8 @@ class TestCliWarm:
         mock_medha.warm_from_file = AsyncMock(return_value=1)
 
         env_overrides = {"MEDHA_EMBEDDER_TYPE": "openai", "OPENAI_API_KEY": "test-key"}
-        with _patch_build_medha(mock_medha):
-            with patch.dict(os.environ, env_overrides):
-                result = runner.invoke(app, ["warm", str(warm_file)])
+        with _patch_build_medha(mock_medha), patch.dict(os.environ, env_overrides):
+            result = runner.invoke(app, ["warm", str(warm_file)])
 
         assert result.exit_code == 0
         assert "1" in result.output
@@ -483,9 +482,8 @@ class TestCliHealth:
         mock_medha = _make_mock_medha()
         mock_medha._backend.count = AsyncMock(return_value=0)
 
-        with _patch_build_medha(mock_medha):
-            with patch.dict(os.environ, {"MEDHA_EMBEDDER_TYPE": "_noop"}):
-                result = runner.invoke(app, ["health"])
+        with _patch_build_medha(mock_medha), patch.dict(os.environ, {"MEDHA_EMBEDDER_TYPE": "_noop"}):
+            result = runner.invoke(app, ["health"])
 
         assert "SKIPPED" in result.output
 

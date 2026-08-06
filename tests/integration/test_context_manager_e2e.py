@@ -48,7 +48,7 @@ class TestAsyncContextManagerE2E:
         backend.close = spy_close
 
         with pytest.raises(ValueError, match="test error"):
-            async with Medha("ctx_exc_test", embedder, backend, settings) as m:
+            async with Medha("ctx_exc_test", embedder, backend, settings):
                 raise ValueError("test error")
 
         assert closed

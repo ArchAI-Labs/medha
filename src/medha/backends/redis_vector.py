@@ -1,5 +1,6 @@
 """RedisVectorBackend — Redis Stack (RediSearch) vector storage backend."""
 
+import contextlib
 import logging
 import re
 import time
@@ -12,7 +13,10 @@ from medha.types import CacheEntry, CacheResult, PersistedStats
 logger = logging.getLogger(__name__)
 
 try:
-    import numpy as np
+    # Imported here purely as an availability check: the methods that encode
+    # vectors import numpy locally, but HAS_REDIS must be False when it is
+    # missing, or the backend fails later with an opaque NameError.
+    import numpy as np  # noqa: F401
     import redis.asyncio as aioredis
     from redis.asyncio import Redis, Sentinel
     from redis.commands.search.field import (
@@ -90,6 +94,8 @@ def _doc_to_result(doc: Any, score: float) -> CacheResult:
         response_summary=_get("response_summary") or None,
         template_id=_get("template_id") or None,
         usage_count=int(_get("usage_count", 0)),
+        feedback_correct=int(_get("feedback_correct", 0) or 0),
+        feedback_incorrect=int(_get("feedback_incorrect", 0) or 0),
         created_at=created_at,
         expires_at=expires_at,
     )
@@ -235,7 +241,8 @@ class RedisVectorBackend(VectorStorageBackend):
                 .return_fields(
                     "original_question", "normalized_question", "generated_query",
                     "query_hash", "response_summary", "template_id",
-                    "usage_count", "created_at", "expires_at", "__score",
+                    "usage_count", "feedback_correct", "feedback_incorrect",
+                    "created_at", "expires_at", "__score",
                 )
                 .paging(0, limit)
                 .dialect(2)
@@ -287,6 +294,8 @@ class RedisVectorBackend(VectorStorageBackend):
                     "response_summary": entry.response_summary or "",
                     "template_id": entry.template_id or "",
                     "usage_count": entry.usage_count,
+                    "feedback_correct": entry.feedback_correct,
+                    "feedback_incorrect": entry.feedback_incorrect,
                     "created_at": created_at,
                     "expires_at": expires_at,
                     "vector": vec_bytes,
@@ -310,7 +319,8 @@ class RedisVectorBackend(VectorStorageBackend):
         return_fields = [
             "original_question", "normalized_question", "generated_query",
             "query_hash", "response_summary", "template_id",
-            "usage_count", "created_at", "expires_at",
+            "usage_count", "feedback_correct", "feedback_incorrect",
+            "created_at", "expires_at",
         ]
         if with_vectors:
             return_fields.append("vector")
@@ -367,7 +377,8 @@ class RedisVectorBackend(VectorStorageBackend):
                 .return_fields(
                     "original_question", "normalized_question", "generated_query",
                     "query_hash", "response_summary", "template_id",
-                    "usage_count", "created_at", "expires_at",
+                    "usage_count", "feedback_correct", "feedback_incorrect",
+                    "created_at", "expires_at",
                 )
                 .paging(0, 1)
                 .dialect(2)
@@ -441,7 +452,8 @@ class RedisVectorBackend(VectorStorageBackend):
                 .return_fields(
                     "original_question", "normalized_question", "generated_query",
                     "query_hash", "response_summary", "template_id",
-                    "usage_count", "created_at", "expires_at",
+                    "usage_count", "feedback_correct", "feedback_incorrect",
+                    "created_at", "expires_at",
                 )
                 .paging(0, 1)
                 .dialect(2)
@@ -545,8 +557,6 @@ class RedisVectorBackend(VectorStorageBackend):
 
     async def close(self) -> None:
         if self._client is not None:
-            try:
+            with contextlib.suppress(Exception):
                 await self._client.aclose()
-            except Exception:
-                pass
         self._client = None

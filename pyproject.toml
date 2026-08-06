@@ -46,8 +46,10 @@ gliner = ["gliner>=0.2,<1"]
 # Fuzzy matching
 fuzzy = ["rapidfuzz>=3.0,<4"]
 
-# Redis Stack (RediSearch) vector backend + L1 cache
-redis = ["redis[hiredis]>=4.6,<6"]
+# Redis Stack (RediSearch) vector backend + L1 cache.
+# numpy is required, not optional: RedisVectorBackend encodes vectors with
+# np.array(...).tobytes() and gates HAS_REDIS on the import.
+redis = ["redis[hiredis]>=4.6,<6", "numpy>=1.21"]
 
 # CLI
 cli = ["typer>=0.12,<1", "rich>=13,<14"]
@@ -133,7 +135,16 @@ ignore = ["TC001", "TC003"]
 # E402: imports after pytest.importorskip are intentional
 # A002: `id` arg in test helpers is conventional and clear in context
 # B017: broad Exception in hierarchy tests is intentional
-"tests/**" = ["E402", "A002", "B017"]
+# SIM117: nested `with patch(...)` blocks read better than one long combined
+#         statement when each patch target is on its own line
+"tests/**" = ["E402", "A002", "B017", "SIM117"]
+# F401/E402: optional backends and embedders are re-exported through a
+# try/except ImportError chain and collected into __all__ at runtime, which
+# ruff cannot see. The imports are the public API, not dead code.
+"src/medha/__init__.py" = ["F401", "E402"]
+"src/medha/backends/__init__.py" = ["F401", "E402"]
+# B008: typer.Argument()/typer.Option() in defaults is the Typer idiom.
+"src/medha/cli/_app.py" = ["B008"]
 
 [tool.coverage.run]
 source = ["medha"]
@@ -169,6 +180,8 @@ module = [
     "redis.*",
     "numpy",
     "numpy.*",
+    "pandas",
+    "pandas.*",
     "elasticsearch",
     "elasticsearch.*",
     "chromadb",

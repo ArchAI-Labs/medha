@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import os
-import sys
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncIterator, Optional
 
 import typer
 
@@ -17,62 +16,62 @@ from medha.interfaces.embedder import BaseEmbedder
 app = typer.Typer(help="Medha cache management CLI.")
 
 _LOTUS = r"""
-                                             .                                                      
-                                            ...                                                     
-                                            ...                                                     
-                                           .....                                                    
-                                           ++.+-.                                                   
-                                        ..-..-..-..                                                 
-                                        +.#+.#-+#++.                                                
-                                     ++.+-.+-.+-.+-.+..                                             
-                                ................... ..+.                                            
-                                ..++.++.++.++.++.++.++.++#..                                        
-                                .. .. .....................                                         
-                            ...++++++++++-+.....++-++-++.++....                                     
-                         ....... ............ . ... .............  .                                
-                         ...+-.--.++.-+.... ..  ....+-.+-.-+..+....                                 
-                       ..............               ..................                              
-                    . +#.+..+.#+..+....     .#      ..##..#..#..#.#+..                              
-  ..               ...+#.++.##.++......   .... ..        .+..#+-#+--.-.                             
-  ..               ............... ..      ......       .................                           
-  ...++   ...-+.-+--+--+-++-...    ..   ...+-.+-.-..       .....-.--.--.--.-+.#.   ..+...           
-  ................... .... ...         ...... ..... .       .....  ............  ........  .        
- . .----------+-+--+--+-+..       ..-#+-++-+--++--+-++.         ..+.+-+.-.--.-+.-+.-+.-....         
-    ........... ........ ...    ..............  ... ........       . ........   ........ ..         
-    -+..+......   .-#.-..      ...++.++.+++.   ..+-.+-.+-...      ....-...  ......-...-.            
-    ......       ........    ...........  .  .    ............     .........   . .......            
-   .+.++.        .++-..     ..++-+++++-#.         .#+-+-++-#+..     .++.....     ..-+.-.            
-    .+-.+.   -+.-+.-+ .   ..+-.+-..  .     -.-#+....    .-+..+.-.   ..+..+..+..  .+.-+..            
-    ......   ..........   .... .....       .... ....   ..........   ...........  .......            
-  ...+..-... .-........   ..++..      .-++.++#++.++...     ..++..   .-.....--..  ...-+--.           
-  ........  ............  ........ ......................  .......  .....+.....  .+......           
-  .+.++.     --+..   .... .++-.    .#+-++.-  ...-+.++.+.    .+.-.  +.-    .-+..    ..+...           
- ........    ... .     .   ....   ....  ......       ....    .  .  ...    ... .    ......           
- ...+.+..    -#...     .....+-.  .--.-..     .      ...-+.. .--......     ...-.    ...-.. .         
- ......    .......     .. .....   .....             ...... .....   ..     .....    . ......         
- ....+#   ..#-++            ..+ . +-.                 .+.. .+...          .-+.+...   +-.            
- ..#-+#..   .--...                 ..                       ..            ..--.    .+-.#...         
- .........   .....                 ..                .... .               .....  . .......          
- . ..+.-+.   .....       .. ..                         +.. ..           ...-... ....+-..            
-    ......  ......        .....          ...              .                 . ...........           
-      +--#-+-. ...#..    ...+++..+   ..+..-..    ..+..++-+...   #...   ...   .-..#.-....            
-     ..  ...... .....    .........   .......... .............. ...     ...   ...........            
-             ...........    ...##+..+.......++..#-....... ......--...............                   
-        .....  . .. . ............          ..... .....   ..........................                
-         .+-# .#..#..+-... ..+#. ...        ...-#.... . .#..++.-+..#..+.-..-...+.+.                 
-          .+#..    ..+..#...-.#...      ..#  .  .+.....        .  .... ....-..                      
-          .................+........................... ....#.. ................                    
-                            .. ...-..  .......................                                      
-                               ....... ....-.....-.....-....                                        
-                                     .     ----..                                                   
-                                         . ......      ..                                           
-                                         ...  .-..                                                  
-                                           ..    . .                                                
-                                         .+.-. .+...                                                
-                                           ..+......                                                
-                                           ..-......                                                
-                                            .....                                                   
-                                            ..                                                                                                                      
+                                             .
+                                            ...
+                                            ...
+                                           .....
+                                           ++.+-.
+                                        ..-..-..-..
+                                        +.#+.#-+#++.
+                                     ++.+-.+-.+-.+-.+..
+                                ................... ..+.
+                                ..++.++.++.++.++.++.++.++#..
+                                .. .. .....................
+                            ...++++++++++-+.....++-++-++.++....
+                         ....... ............ . ... .............  .
+                         ...+-.--.++.-+.... ..  ....+-.+-.-+..+....
+                       ..............               ..................
+                    . +#.+..+.#+..+....     .#      ..##..#..#..#.#+..
+  ..               ...+#.++.##.++......   .... ..        .+..#+-#+--.-.
+  ..               ............... ..      ......       .................
+  ...++   ...-+.-+--+--+-++-...    ..   ...+-.+-.-..       .....-.--.--.--.-+.#.   ..+...
+  ................... .... ...         ...... ..... .       .....  ............  ........  .
+ . .----------+-+--+--+-+..       ..-#+-++-+--++--+-++.         ..+.+-+.-.--.-+.-+.-+.-....
+    ........... ........ ...    ..............  ... ........       . ........   ........ ..
+    -+..+......   .-#.-..      ...++.++.+++.   ..+-.+-.+-...      ....-...  ......-...-.
+    ......       ........    ...........  .  .    ............     .........   . .......
+   .+.++.        .++-..     ..++-+++++-#.         .#+-+-++-#+..     .++.....     ..-+.-.
+    .+-.+.   -+.-+.-+ .   ..+-.+-..  .     -.-#+....    .-+..+.-.   ..+..+..+..  .+.-+..
+    ......   ..........   .... .....       .... ....   ..........   ...........  .......
+  ...+..-... .-........   ..++..      .-++.++#++.++...     ..++..   .-.....--..  ...-+--.
+  ........  ............  ........ ......................  .......  .....+.....  .+......
+  .+.++.     --+..   .... .++-.    .#+-++.-  ...-+.++.+.    .+.-.  +.-    .-+..    ..+...
+ ........    ... .     .   ....   ....  ......       ....    .  .  ...    ... .    ......
+ ...+.+..    -#...     .....+-.  .--.-..     .      ...-+.. .--......     ...-.    ...-.. .
+ ......    .......     .. .....   .....             ...... .....   ..     .....    . ......
+ ....+#   ..#-++            ..+ . +-.                 .+.. .+...          .-+.+...   +-.
+ ..#-+#..   .--...                 ..                       ..            ..--.    .+-.#...
+ .........   .....                 ..                .... .               .....  . .......
+ . ..+.-+.   .....       .. ..                         +.. ..           ...-... ....+-..
+    ......  ......        .....          ...              .                 . ...........
+      +--#-+-. ...#..    ...+++..+   ..+..-..    ..+..++-+...   #...   ...   .-..#.-....
+     ..  ...... .....    .........   .......... .............. ...     ...   ...........
+             ...........    ...##+..+.......++..#-....... ......--...............
+        .....  . .. . ............          ..... .....   ..........................
+         .+-# .#..#..+-... ..+#. ...        ...-#.... . .#..++.-+..#..+.-..-...+.+.
+          .+#..    ..+..#...-.#...      ..#  .  .+.....        .  .... ....-..
+          .................+........................... ....#.. ................
+                            .. ...-..  .......................
+                               ....... ....-.....-.....-....
+                                     .     ----..
+                                         . ......      ..
+                                         ...  .-..
+                                           ..    . .
+                                         .+.-. .+...
+                                           ..+......
+                                           ..-......
+                                            .....
+                                            ..
 
                                          - MEDHA -
 """
@@ -114,13 +113,13 @@ def _resolve_embedder(settings: Settings) -> BaseEmbedder:
         try:
             from medha.embeddings.openai_compatible_adapter import OpenAICompatibleAdapter
         except ImportError:
-            raise ConfigurationError("pip install 'medha-archai[openai]'")
+            raise ConfigurationError("pip install 'medha-archai[openai]'") from None
         return OpenAICompatibleAdapter(settings)
     if et == "mistral":
         try:
             from medha.embeddings.mistral_adapter import MistralAdapter
         except ImportError:
-            raise ConfigurationError("pip install 'medha-archai[mistral]'")
+            raise ConfigurationError("pip install 'medha-archai[mistral]'") from None
         return MistralAdapter(settings)
     raise ConfigurationError(f"Unknown embedder_type: '{et}'")
 
@@ -143,7 +142,7 @@ async def _build_medha(collection: str, settings: Settings) -> AsyncIterator[Med
 
 @app.command()
 def stats(
-    collection: Optional[str] = typer.Option(
+    collection: str | None = typer.Option(
         None, "--collection", help="Collection name (env: MEDHA_COLLECTION)."
     ),
     json_output: bool = typer.Option(False, "--json", help="Print result as JSON."),
@@ -172,7 +171,7 @@ def stats(
                     persisted = None
         except (ConfigurationError, RuntimeError) as exc:
             typer.echo(f"Error: {exc}", err=True)
-            raise typer.Exit(code=1)
+            raise typer.Exit(code=1) from exc
         if json_output:
             import json
             payload: dict[str, object | None] = {
@@ -213,7 +212,7 @@ def stats(
 @app.command()
 def search(
     question: str = typer.Argument(..., help="Natural-language question to look up."),
-    collection: Optional[str] = typer.Option(
+    collection: str | None = typer.Option(
         None, "--collection", "-c",
         help="Collection to search. Defaults to MEDHA_COLLECTION (or 'default').",
     ),
@@ -236,7 +235,7 @@ def search(
         _resolve_embedder(settings)
     except (ConfigurationError, RuntimeError) as exc:
         typer.echo(str(exc), err=True)
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=1) from exc
 
     async def _run():
         async with _build_medha(coll, settings) as m:
@@ -267,13 +266,13 @@ def search(
 @app.command()
 def warm(
     file: Path = typer.Argument(..., help="Path to a .json or .jsonl file of cache entries."),
-    collection: Optional[str] = typer.Option(
+    collection: str | None = typer.Option(
         None, "--collection", help="Collection name (env: MEDHA_COLLECTION)."
     ),
-    ttl: Optional[int] = typer.Option(
+    ttl: int | None = typer.Option(
         None, "--ttl", help="TTL in seconds for each stored entry."
     ),
-    batch_size: Optional[int] = typer.Option(
+    batch_size: int | None = typer.Option(
         None, "--batch-size", help="Number of entries per upsert batch."
     ),
 ) -> None:
@@ -310,10 +309,10 @@ def warm(
                     )
                 except RuntimeError as exc:
                     typer.echo(f"Error: {exc}", err=True)
-                    raise typer.Exit(code=1)
+                    raise typer.Exit(code=1) from exc
         except (ConfigurationError, RuntimeError) as exc:
             typer.echo(f"Error: {exc}", err=True)
-            raise typer.Exit(code=1)
+            raise typer.Exit(code=1) from exc
 
         typer.echo(f"Warmed {stored} entries into '{coll}'.")
 
@@ -323,7 +322,7 @@ def warm(
 @app.command()
 def invalidate(
     question: str = typer.Argument(..., help="Question text to remove from the cache."),
-    collection: Optional[str] = typer.Option(
+    collection: str | None = typer.Option(
         None, "--collection", help="Collection name (env: MEDHA_COLLECTION)."
     ),
 ) -> None:
@@ -337,7 +336,7 @@ def invalidate(
                 removed = await m.invalidate(question)
         except (ConfigurationError, RuntimeError) as exc:
             typer.echo(f"Error: {exc}", err=True)
-            raise typer.Exit(code=1)
+            raise typer.Exit(code=1) from exc
         typer.echo("Removed." if removed else "Not found.")
 
     asyncio.run(_run())
@@ -345,7 +344,7 @@ def invalidate(
 
 @app.command("invalidate-collection")
 def invalidate_collection(
-    collection: Optional[str] = typer.Option(
+    collection: str | None = typer.Option(
         None, "--collection", help="Collection name (env: MEDHA_COLLECTION)."
     ),
     yes: bool = typer.Option(
@@ -373,7 +372,7 @@ def invalidate_collection(
                 deleted = await m.invalidate_collection()
         except (ConfigurationError, RuntimeError) as exc:
             typer.echo(f"Error: {exc}", err=True)
-            raise typer.Exit(code=1)
+            raise typer.Exit(code=1) from exc
         typer.echo(f"Deleted {deleted} entries from '{coll}'.")
 
     asyncio.run(_run())
@@ -381,7 +380,7 @@ def invalidate_collection(
 
 @app.command()
 def expire(
-    collection: Optional[str] = typer.Option(
+    collection: str | None = typer.Option(
         None, "--collection", help="Collection name (env: MEDHA_COLLECTION)."
     ),
 ) -> None:
@@ -395,7 +394,7 @@ def expire(
                 deleted = await m.expire()
         except (ConfigurationError, RuntimeError) as exc:
             typer.echo(f"Error: {exc}", err=True)
-            raise typer.Exit(code=1)
+            raise typer.Exit(code=1) from exc
         typer.echo(f"Deleted {deleted} expired entries.")
 
     asyncio.run(_run())
@@ -403,7 +402,7 @@ def expire(
 
 @app.command()
 def dedup(
-    collection: Optional[str] = typer.Option(
+    collection: str | None = typer.Option(
         None, "--collection", help="Collection name (env: MEDHA_COLLECTION)."
     ),
 ) -> None:
@@ -419,7 +418,7 @@ def dedup(
             "Install it with: pip install pandas",
             err=True,
         )
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=1) from None
 
     settings = Settings()
     coll = collection or settings.collection
@@ -430,7 +429,7 @@ def dedup(
                 removed = await m.dedup_collection()
         except (ConfigurationError, RuntimeError) as exc:
             typer.echo(f"Error: {exc}", err=True)
-            raise typer.Exit(code=1)
+            raise typer.Exit(code=1) from exc
         typer.echo(f"Removed {removed} duplicate entries.")
 
     asyncio.run(_run())
@@ -438,10 +437,10 @@ def dedup(
 
 @app.command()
 def export(
-    collection: Optional[str] = typer.Option(
+    collection: str | None = typer.Option(
         None, "--collection", help="Collection name (env: MEDHA_COLLECTION)."
     ),
-    output: Optional[Path] = typer.Option(
+    output: Path | None = typer.Option(
         None, "--output", help="Output file path. Defaults to stdout."
     ),
     format_: str = typer.Option(
@@ -461,7 +460,7 @@ def export(
             "Install it with: pip install pandas",
             err=True,
         )
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=1) from None
 
     if format_ not in ("csv", "json"):
         typer.echo(f"Error: unsupported format '{format_}'. Choose csv or json.", err=True)
@@ -477,15 +476,16 @@ def export(
                     df = await m.export_to_dataframe()
                 except ConfigurationError as exc:
                     typer.echo(f"Error: {exc}", err=True)
-                    raise typer.Exit(code=1)
+                    raise typer.Exit(code=1) from exc
         except (ConfigurationError, RuntimeError) as exc:
             typer.echo(f"Error: {exc}", err=True)
-            raise typer.Exit(code=1)
+            raise typer.Exit(code=1) from exc
 
-        if format_ == "csv":
-            content = df.to_csv(index=False)
-        else:
-            content = df.to_json(orient="records", indent=2)
+        content = (
+            df.to_csv(index=False)
+            if format_ == "csv"
+            else df.to_json(orient="records", indent=2)
+        )
 
         if output is None:
             typer.echo(content)
@@ -499,7 +499,7 @@ def export(
 @app.command()
 def feedback(
     question: str = typer.Argument(..., help="Question text to record feedback for."),
-    collection: Optional[str] = typer.Option(
+    collection: str | None = typer.Option(
         None, "--collection", help="Collection name (env: MEDHA_COLLECTION)."
     ),
     correct: bool = typer.Option(
@@ -531,7 +531,7 @@ def feedback(
                 found = await m.feedback(question, correct=correct)
         except (ConfigurationError, RuntimeError) as exc:
             typer.echo(f"Error: {exc}", err=True)
-            raise typer.Exit(code=1)
+            raise typer.Exit(code=1) from exc
         typer.echo("Feedback recorded." if found else "Entry not found.")
 
     asyncio.run(_run())
@@ -539,7 +539,7 @@ def feedback(
 
 @app.command()
 def health(
-    collection: Optional[str] = typer.Option(
+    collection: str | None = typer.Option(
         None, "--collection", "-c",
         help="Collection to probe. Defaults to MEDHA_COLLECTION (or 'default').",
     ),
