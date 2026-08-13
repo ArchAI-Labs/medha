@@ -41,20 +41,20 @@ settings = Settings(
 
 ## What happens when the LLM schema changes?
 
-If a database schema change makes a cached SQL query invalid (e.g., a column is renamed), you need to invalidate the affected entries. The cleanest approach is to tag all queries by table at store time:
+If a database schema change makes a cached SQL query invalid (e.g., a column is renamed), you need to invalidate the affected entries. The cleanest approach is to group queries by table at store time via `template_id`:
 
 ```python
 await cache.store(
     "How many users?",
     "SELECT COUNT(*) FROM users",
-    tags=["users_table"],
+    template_id="users_table",
 )
 ```
 
 When the `users` table schema changes:
 
 ```python
-await cache.invalidate_by_tag("users_table")
+await cache.invalidate_by_template("users_table")
 ```
 
 All affected entries are removed in one call. Then re-warm the cache with corrected queries using `store_batch` or `warm_from_file`.
