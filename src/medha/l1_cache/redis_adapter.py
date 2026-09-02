@@ -5,13 +5,35 @@ Requires: ``pip install medha[redis]``
 
 from __future__ import annotations
 
-import json
 import logging
 
 from medha.interfaces.l1_cache import L1CacheBackend
-from medha.types import CacheHit, SearchStrategy
+from medha.types import CacheHit
 
 logger = logging.getLogger(__name__)
+
+
+def _serialise(hit: CacheHit) -> str:
+    """Serialise a ``CacheHit`` to its JSON form.
+
+    Derived from the model rather than a hand-written field list, so every
+    field ``CacheHit`` gains travels through the shared L1 automatically.
+    The whitelist this replaced silently dropped ``expires_at``, which meant
+    the per-entry expiry check in ``Medha._check_l1_cache`` never fired on
+    this backend: an expired entry was served until the Redis-level ``ttl``
+    (a single global value, when set at all) removed the key.
+    """
+    return hit.model_dump_json()
+
+
+def _deserialise(data: str) -> CacheHit:
+    """Rebuild a ``CacheHit`` from its JSON form.
+
+    Payloads written by an earlier version simply lack the newer keys and
+    fall back to the model defaults, so a populated cache keeps working
+    across the upgrade.
+    """
+    return CacheHit.model_validate_json(data)
 
 
 class RedisL1Cache(L1CacheBackend):
@@ -60,23 +82,10 @@ class RedisL1Cache(L1CacheBackend):
         return f"{self._prefix}:{key}"
 
     def _serialise(self, hit: CacheHit) -> str:
-        return json.dumps({
-            "generated_query": hit.generated_query,
-            "response_summary": hit.response_summary,
-            "confidence": hit.confidence,
-            "strategy": hit.strategy.value if hit.strategy else None,
-            "template_used": hit.template_used,
-        })
+        return _serialise(hit)
 
     def _deserialise(self, data: str) -> CacheHit:
-        payload = json.loads(data)
-        return CacheHit(
-            generated_query=payload.get("generated_query"),
-            response_summary=payload.get("response_summary"),
-            confidence=payload.get("confidence", 1.0),
-            strategy=SearchStrategy(payload["strategy"]) if payload.get("strategy") else SearchStrategy.NO_MATCH,
-            template_used=payload.get("template_used"),
-        )
+        return _deserialise(data)
 
     # ------------------------------------------------------------------
     # L1CacheBackend interface
