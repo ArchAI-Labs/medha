@@ -101,6 +101,7 @@ def mock_index_client():
     client.list_index_names = MagicMock(return_value=_AsyncIter([]))
     client.get_index = AsyncMock()
     client.create_index = AsyncMock()
+    client.create_or_update_index = AsyncMock()
     client.delete_index = AsyncMock()
     client.close = AsyncMock()
     return client
@@ -715,3 +716,81 @@ async def test_stats_methods_require_connection():
 
     with pytest.raises(StorageError, match="connect"):
         await b.save_stats(COLL, PersistedStats())
+
+
+# ---------------------------------------------------------------------------
+# initialize — field reconciliation (S0.2)
+# ---------------------------------------------------------------------------
+
+
+def _az_index(field_names):
+    """A SearchIndex carrying exactly *field_names*.
+
+    SimpleNamespace rather than MagicMock: ``MagicMock(name=...)`` names the
+    mock instead of setting the ``.name`` attribute being asserted on.
+    """
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        name="idx",
+        fields=[SimpleNamespace(name=n) for n in field_names],
+    )
+
+
+def _declared_field_names():
+    from medha.backends.azure_search import _index_fields
+
+    return [f.name for f in _index_fields(DIM)]
+
+
+async def test_initialize_adds_fields_missing_from_an_older_index(az_backend):
+    """An index created before a field existed must receive it.
+
+    0.5.0 hit this with the feedback counters and told users to recreate the
+    index, on the understanding that Azure cannot add fields to a live one —
+    but the code never attempted it. This asserts the attempt is made and
+    that existing fields are carried through rather than replaced.
+    """
+    b, _search, index_client = az_backend
+    kept = [n for n in _declared_field_names() if not n.startswith("feedback_")]
+    index_client.get_index.side_effect = None
+    index_client.get_index.return_value = _az_index(kept)
+    index_client.create_index.reset_mock()  # the fixture created the index once
+
+    await b.initialize(COLL, DIM)
+
+    index_client.create_index.assert_not_awaited()
+    index_client.create_or_update_index.assert_awaited_once()
+    sent = index_client.create_or_update_index.await_args.args[0]
+    names = [f.name for f in sent.fields]
+    assert names[: len(kept)] == kept, "existing fields must be preserved in order"
+    assert names[len(kept):] == ["feedback_correct", "feedback_incorrect"]
+
+
+async def test_initialize_updates_nothing_when_the_index_is_current(az_backend):
+    b, _search, index_client = az_backend
+    index_client.get_index.side_effect = None
+    index_client.get_index.return_value = _az_index(_declared_field_names())
+
+    await b.initialize(COLL, DIM)
+
+    index_client.create_or_update_index.assert_not_awaited()
+
+
+async def test_initialize_names_the_fields_it_could_not_add(az_backend):
+    """If Azure really does refuse, say which fields and why it matters."""
+    from medha.exceptions import StorageInitializationError
+
+    b, _search, index_client = az_backend
+    index_client.get_index.side_effect = None
+    index_client.get_index.return_value = _az_index(
+        [n for n in _declared_field_names() if n != "expires_at"]
+    )
+    index_client.create_or_update_index.side_effect = RuntimeError(
+        "cannot add fields to a live index"
+    )
+
+    with pytest.raises(StorageInitializationError) as excinfo:
+        await b.initialize(COLL, DIM)
+
+    assert "expires_at" in str(excinfo.value)

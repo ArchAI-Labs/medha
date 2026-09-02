@@ -75,6 +75,23 @@ def _search_response_with_hit(doc_id: str, score: float = 1.0, **source_fields) 
 # ---------------------------------------------------------------------------
 
 
+def _mapping_response(properties=None):
+    """A get_mapping response. Defaults to an index that is already up to date."""
+    from medha.backends.elasticsearch import _index_properties
+
+    props = _index_properties(DIM) if properties is None else properties
+    return {"resolved-index-name": {"mappings": {"properties": props}}}
+
+
+def _mapping_without(*names):
+    """The mapping of an index created before *names* were declared."""
+    from medha.backends.elasticsearch import _index_properties
+
+    return _mapping_response(
+        {k: v for k, v in _index_properties(DIM).items() if k not in names}
+    )
+
+
 @pytest.fixture
 def mock_es_client():
     client = AsyncMock()
@@ -82,6 +99,8 @@ def mock_es_client():
     client.indices = AsyncMock()
     client.indices.exists = AsyncMock(return_value=False)
     client.indices.create = AsyncMock()
+    client.indices.get_mapping = AsyncMock(return_value=_mapping_response())
+    client.indices.put_mapping = AsyncMock()
     client.search = AsyncMock(return_value=_empty_search_response())
     client.count = AsyncMock(return_value={"count": 0})
     client.update = AsyncMock()
@@ -174,13 +193,15 @@ async def test_initialize_creates_index_when_not_exists(es_backend):
     assert "query_hash" in str(body)
 
 
-async def test_initialize_skips_when_index_exists(es_backend):
+async def test_initialize_does_not_recreate_an_existing_index(es_backend):
     b, client = es_backend
     client.indices.exists.return_value = True
 
     await b.initialize(COLL, DIM)
 
     client.indices.create.assert_not_awaited()
+    # Mapping already complete → nothing to add.
+    client.indices.put_mapping.assert_not_awaited()
 
 
 async def test_initialize_idempotent(es_backend):
@@ -196,6 +217,62 @@ async def test_initialize_idempotent(es_backend):
     await b.initialize(COLL, DIM)
 
     client.indices.create.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# initialize — mapping reconciliation (S0.2)
+# ---------------------------------------------------------------------------
+
+
+async def test_initialize_adds_properties_missing_from_an_older_index(es_backend):
+    """An index created before a property existed must get it on next start.
+
+    ``initialize()`` used to return the moment the index existed, so a mapping
+    written by an earlier version was never revisited. Dynamic mapping hid
+    that for simple types and got it wrong for the rest.
+    """
+    b, client = es_backend
+    client.indices.exists.return_value = True
+    client.indices.get_mapping.return_value = _mapping_without(
+        "feedback_correct", "feedback_incorrect"
+    )
+
+    await b.initialize(COLL, DIM)
+
+    client.indices.put_mapping.assert_awaited_once()
+    added = client.indices.put_mapping.await_args.kwargs["body"]["properties"]
+    assert sorted(added) == ["feedback_correct", "feedback_incorrect"]
+    assert added["feedback_correct"] == {"type": "integer"}
+
+
+async def test_initialize_leaves_unknown_properties_alone(es_backend):
+    """An index written by a newer version must not be touched."""
+    from medha.backends.elasticsearch import _index_properties
+
+    b, client = es_backend
+    client.indices.exists.return_value = True
+    client.indices.get_mapping.return_value = _mapping_response(
+        {**_index_properties(DIM), "from_the_future": {"type": "keyword"}}
+    )
+
+    await b.initialize(COLL, DIM)
+
+    client.indices.put_mapping.assert_not_awaited()
+
+
+async def test_initialize_names_the_properties_it_could_not_add(es_backend):
+    """The floor: fail here with the cause, not later on an opaque write."""
+    from medha.exceptions import StorageInitializationError
+
+    b, client = es_backend
+    client.indices.exists.return_value = True
+    client.indices.get_mapping.return_value = _mapping_without("expires_at")
+    client.indices.put_mapping.side_effect = RuntimeError("mapping is frozen")
+
+    with pytest.raises(StorageInitializationError) as excinfo:
+        await b.initialize(COLL, DIM)
+
+    assert "expires_at" in str(excinfo.value)
 
 
 # ---------------------------------------------------------------------------

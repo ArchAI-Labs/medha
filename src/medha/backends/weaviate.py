@@ -50,6 +50,29 @@ def _ttl_filter() -> Any:
     return Filter.by_property("expires_at").is_none(True) | Filter.by_property("expires_at").greater_than(now)
 
 
+def _collection_properties() -> list[Any]:
+    """The properties a collection is expected to declare.
+
+    Defined once so ``initialize()`` can both create a collection with them and
+    check an existing one against them. Adding an entry here is what makes
+    older collections receive the property on their next ``start()``.
+    """
+    text = wvc.config.DataType.TEXT
+    return [
+        wvc.config.Property(name="original_question", data_type=text),
+        wvc.config.Property(name="normalized_question", data_type=text),
+        wvc.config.Property(name="generated_query", data_type=text),
+        wvc.config.Property(name="query_hash", data_type=text),
+        wvc.config.Property(name="response_summary", data_type=text),
+        wvc.config.Property(name="template_id", data_type=text),
+        wvc.config.Property(name="usage_count", data_type=wvc.config.DataType.INT),
+        wvc.config.Property(name="feedback_correct", data_type=wvc.config.DataType.INT),
+        wvc.config.Property(name="feedback_incorrect", data_type=wvc.config.DataType.INT),
+        wvc.config.Property(name="created_at", data_type=wvc.config.DataType.DATE),
+        wvc.config.Property(name="expires_at", data_type=wvc.config.DataType.DATE),
+    ]
+
+
 def _entry_to_properties(entry: CacheEntry) -> dict[str, Any]:
     return {
         "original_question": entry.original_question,
@@ -146,24 +169,13 @@ class WeaviateBackend(VectorStorageBackend):
                     )
                     await self._client.collections.delete(wv_name)
                 else:
+                    await self._reconcile_properties(col, wv_name)
                     self._collections[collection_name] = col
                     return
 
             await self._client.collections.create(
                 name=wv_name,
-                properties=[
-                    wvc.config.Property(name="original_question", data_type=wvc.config.DataType.TEXT),
-                    wvc.config.Property(name="normalized_question", data_type=wvc.config.DataType.TEXT),
-                    wvc.config.Property(name="generated_query", data_type=wvc.config.DataType.TEXT),
-                    wvc.config.Property(name="query_hash", data_type=wvc.config.DataType.TEXT),
-                    wvc.config.Property(name="response_summary", data_type=wvc.config.DataType.TEXT),
-                    wvc.config.Property(name="template_id", data_type=wvc.config.DataType.TEXT),
-                    wvc.config.Property(name="usage_count", data_type=wvc.config.DataType.INT),
-                    wvc.config.Property(name="feedback_correct", data_type=wvc.config.DataType.INT),
-                    wvc.config.Property(name="feedback_incorrect", data_type=wvc.config.DataType.INT),
-                    wvc.config.Property(name="created_at", data_type=wvc.config.DataType.DATE),
-                    wvc.config.Property(name="expires_at", data_type=wvc.config.DataType.DATE),
-                ],
+                properties=_collection_properties(),
                 inverted_index_config=wvc.config.Configure.inverted_index(
                     index_null_state=True,
                 ),
@@ -173,10 +185,61 @@ class WeaviateBackend(VectorStorageBackend):
                 ),
             )
             self._collections[collection_name] = self._client.collections.get(wv_name)
+        except StorageInitializationError:
+            raise
         except Exception as e:
             raise StorageInitializationError(
                 f"Failed to initialize Weaviate collection '{wv_name}': {e}"
             ) from e
+
+    async def _reconcile_properties(self, col: Any, wv_name: str) -> None:
+        """Add properties a collection created by an older version is missing.
+
+        Weaviate declares properties up front, and ``initialize()`` handed the
+        existing collection back without ever comparing them, so a property
+        added to the schema later never reached collections already in place.
+
+        ``add_property`` is additive and non-destructive — which is the point.
+        The drop-and-recreate above exists only for ``index_null_state``, which
+        is immutable; reaching for it to add a property would throw away the
+        user's cache to avoid one API call.
+        """
+        try:
+            cfg = await col.config.get()
+            # Weaviate may hand property names back in a different case than
+            # they were declared in; ours are all lowercase, so folding both
+            # sides can only prevent a re-add, never mask a real absence.
+            existing = {p.name.lower() for p in (cfg.properties or [])}
+        except StorageInitializationError:
+            raise
+        except Exception as e:
+            raise StorageInitializationError(
+                f"Could not read the configuration of Weaviate collection "
+                f"'{wv_name}': {e}"
+            ) from e
+
+        missing = [p for p in _collection_properties() if p.name.lower() not in existing]
+        if not missing:
+            return
+
+        names = [p.name for p in missing]
+        try:
+            for prop in missing:
+                await col.config.add_property(prop)
+        except Exception as e:
+            raise StorageInitializationError(
+                f"Weaviate collection '{wv_name}' was created by an older version "
+                f"of medha and is missing the properties {names}. Adding them "
+                f"failed ({e}). Add them by hand before using this collection — "
+                f"writes that supply them will not be stored."
+            ) from e
+
+        logger.info(
+            "Added properties %s to Weaviate collection '%s', created by an "
+            "older version",
+            names,
+            wv_name,
+        )
 
     def _get_collection(self, collection_name: str) -> Any:
         col = self._collections.get(collection_name)

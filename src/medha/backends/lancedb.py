@@ -1,6 +1,7 @@
 """LanceDBBackend — LanceDB vector storage backend."""
 
 import contextlib
+import inspect
 import logging
 from datetime import datetime, timezone
 from typing import Any
@@ -12,9 +13,18 @@ from medha.types import CacheEntry, CacheResult, PersistedStats
 
 logger = logging.getLogger(__name__)
 
+# pyarrow is imported separately from lancedb, though the backend needs both.
+# The schema helpers below are pure functions over pyarrow schemas, and keeping
+# their dependency independent means they stay importable — and testable —
+# wherever pyarrow is present, without a lancedb install or any storage.
+try:
+    import pyarrow as pa
+    HAS_PYARROW = True
+except ImportError:
+    HAS_PYARROW = False
+
 try:
     import lancedb
-    import pyarrow as pa
     HAS_LANCEDB = True
 except ImportError:
     HAS_LANCEDB = False
@@ -47,6 +57,39 @@ def _build_schema(dimension: int) -> "pa.Schema":
         pa.field("created_at", pa.string()),
         pa.field("expires_at", pa.string()),
     ])
+
+
+def _missing_fields(existing: "pa.Schema", expected: "pa.Schema") -> list["pa.Field"]:
+    """Fields of *expected* that *existing* does not carry.
+
+    ``create_table(..., exist_ok=True)`` opens a table that is already there and
+    ignores the schema it was handed, so a table written by an older version
+    keeps exactly the columns it was created with. Every column added to
+    ``_build_schema`` since then is absent, and the first upsert supplying one
+    fails on the whole batch.
+
+    Matching on name alone is enough: columns are only ever appended to the
+    schema, never retyped. A table carrying *extra* columns — written by a
+    newer version — is left alone.
+    """
+    have = set(existing.names)
+    return [field for field in expected if field.name not in have]
+
+
+def _backfill_expression(field: "pa.Field") -> str:
+    """SQL literal LanceDB stores in *field* for rows that predate it.
+
+    ``add_columns`` takes an expression per column rather than a default, so
+    each one needs the value its reader already assumes for a missing column:
+    ``_row_to_result`` coerces counters through ``int(... or 0)`` and text
+    through ``... or None``, so zero and the empty string keep old rows
+    reading exactly as they do now.
+    """
+    if pa.types.is_integer(field.type):
+        return "0"
+    if pa.types.is_floating(field.type):
+        return "0.0"
+    return "''"
 
 
 def _entry_to_row(entry: CacheEntry) -> dict[str, Any]:
@@ -114,9 +157,13 @@ class LanceDBBackend(VectorStorageBackend):
     """
 
     def __init__(self, settings: Any = None) -> None:
-        if not HAS_LANCEDB:
+        if not (HAS_LANCEDB and HAS_PYARROW):
+            missing = " and ".join(
+                name for name, present in (("lancedb>=0.6", HAS_LANCEDB), ("pyarrow", HAS_PYARROW))
+                if not present
+            )
             raise ConfigurationError(
-                "lancedb backend requires 'lancedb>=0.6'. "
+                f"lancedb backend requires {missing}. "
                 "Install with: pip install medha-archai[lancedb]"
             )
         from medha.config import Settings
@@ -149,11 +196,59 @@ class LanceDBBackend(VectorStorageBackend):
         self._dimensions[collection_name] = dimension
         try:
             table = await self._db.create_table(table_name, schema=schema, exist_ok=True)
+            await self._reconcile_schema(table, table_name, schema)
             self._tables[collection_name] = table
+        except StorageInitializationError:
+            raise
         except Exception as e:
             raise StorageInitializationError(
                 f"Failed to initialize LanceDB table '{table_name}': {e}"
             ) from e
+
+    async def _reconcile_schema(
+        self, table: Any, table_name: str, expected: "pa.Schema"
+    ) -> None:
+        """Add the columns a table created by an older version is missing.
+
+        ``initialize()`` is idempotent about a table's *existence* but was not
+        about its *shape*: it handed ``create_table`` the current schema and
+        ``exist_ok=True`` silently ignored it. The mismatch then surfaced at the
+        first upsert, far from its cause and with the whole batch failing.
+
+        Failing here instead, naming the columns, is the floor. Adding them is
+        the repair.
+        """
+        existing = table.schema
+        # The async table exposes schema() as a coroutine method; the sync one
+        # exposes it as a property. Accept either rather than pinning a shape.
+        if callable(existing):
+            existing = existing()
+            if inspect.isawaitable(existing):
+                existing = await existing
+
+        missing = _missing_fields(existing, expected)
+        if not missing:
+            return
+
+        names = [field.name for field in missing]
+        try:
+            await table.add_columns(
+                {field.name: _backfill_expression(field) for field in missing}
+            )
+        except Exception as e:
+            raise StorageInitializationError(
+                f"LanceDB table '{table_name}' was created by an older version of "
+                f"medha and is missing {names}. Adding the columns automatically "
+                f"failed ({e}). Add them by hand or recreate the table before using "
+                f"this collection — otherwise every upsert that supplies one of them "
+                f"fails."
+            ) from e
+
+        logger.info(
+            "Added %s to LanceDB table '%s', created by an older version",
+            names,
+            table_name,
+        )
 
     async def close(self) -> None:
         self._tables.clear()

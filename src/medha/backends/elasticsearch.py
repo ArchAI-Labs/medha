@@ -25,6 +25,34 @@ except ImportError:
 _INDEX_UNSAFE_RE = re.compile(r"[^a-z0-9_-]")
 
 
+def _index_properties(dimension: int) -> dict[str, dict[str, Any]]:
+    """The mapping properties an index is expected to carry.
+
+    Declared in one place so ``initialize()`` can both create an index with
+    them and check an existing index against them. Adding a property here is
+    what makes older indices get it on their next ``start()``.
+    """
+    return {
+        "vector": {
+            "type": "dense_vector",
+            "dims": dimension,
+            "index": True,
+            "similarity": "cosine",
+        },
+        "original_question": {"type": "text"},
+        "normalized_question": {"type": "keyword"},
+        "generated_query": {"type": "text"},
+        "query_hash": {"type": "keyword"},
+        "response_summary": {"type": "text"},
+        "template_id": {"type": "keyword"},
+        "usage_count": {"type": "integer"},
+        "feedback_correct": {"type": "integer"},
+        "feedback_incorrect": {"type": "integer"},
+        "created_at": {"type": "date"},
+        "expires_at": {"type": "date"},
+    }
+
+
 class ElasticsearchBackend(VectorStorageBackend):
     """Elasticsearch 8.x backend. Requires elasticsearch[async]>=8.12."""
 
@@ -76,29 +104,10 @@ class ElasticsearchBackend(VectorStorageBackend):
         try:
             exists = await self._client.indices.exists(index=index)
             if exists:
+                await self._reconcile_mapping(index, dimension)
                 return
             mapping = {
-                "mappings": {
-                    "properties": {
-                        "vector": {
-                            "type": "dense_vector",
-                            "dims": dimension,
-                            "index": True,
-                            "similarity": "cosine",
-                        },
-                        "original_question": {"type": "text"},
-                        "normalized_question": {"type": "keyword"},
-                        "generated_query": {"type": "text"},
-                        "query_hash": {"type": "keyword"},
-                        "response_summary": {"type": "text"},
-                        "template_id": {"type": "keyword"},
-                        "usage_count": {"type": "integer"},
-                        "feedback_correct": {"type": "integer"},
-                        "feedback_incorrect": {"type": "integer"},
-                        "created_at": {"type": "date"},
-                        "expires_at": {"type": "date"},
-                    }
-                },
+                "mappings": {"properties": _index_properties(dimension)},
                 "settings": {
                     "number_of_shards": 1,
                     "number_of_replicas": 0,
@@ -106,10 +115,65 @@ class ElasticsearchBackend(VectorStorageBackend):
             }
             await self._client.indices.create(index=index, body=mapping)
             logger.info("Created Elasticsearch index '%s'", index)
+        except StorageInitializationError:
+            raise
         except Exception as e:
             raise StorageInitializationError(
                 f"Failed to initialize Elasticsearch index '{index}': {e}"
             ) from e
+
+    async def _reconcile_mapping(self, index: str, dimension: int) -> None:
+        """Add mapping properties an index created by an older version lacks.
+
+        ``initialize()`` returned as soon as the index existed, so a mapping
+        written by an earlier version was never revisited and every property
+        added since was missing. Elasticsearch's dynamic mapping papered over
+        that for simple types — inferring ``long`` for the feedback counters,
+        say — which is worse than failing: the index quietly disagrees with the
+        declared mapping, and a property whose type cannot be inferred (a date
+        that first appears as a string, a keyword that must not be analysed)
+        lands wrong and stays wrong.
+
+        Adding properties to a live mapping is supported; changing existing
+        ones is not, and this never tries to.
+        """
+        expected = _index_properties(dimension)
+        try:
+            resp = await self._client.indices.get_mapping(index=index)
+        except Exception as e:
+            raise StorageInitializationError(
+                f"Could not read the mapping of Elasticsearch index '{index}': {e}"
+            ) from e
+
+        # The response is keyed by concrete index name, which differs from the
+        # requested name when it was reached through an alias.
+        body = resp.get(index) if hasattr(resp, "get") else None
+        if body is None:
+            body = next(iter(resp.values()), {}) if hasattr(resp, "values") else {}
+        existing = (body.get("mappings") or {}).get("properties") or {}
+
+        missing = {name: spec for name, spec in expected.items() if name not in existing}
+        if not missing:
+            return
+
+        try:
+            await self._client.indices.put_mapping(
+                index=index, body={"properties": missing}
+            )
+        except Exception as e:
+            raise StorageInitializationError(
+                f"Elasticsearch index '{index}' was created by an older version of "
+                f"medha and is missing the mapping properties {sorted(missing)}. "
+                f"Adding them failed ({e}). Add them with a mapping update, or "
+                f"reindex, before using this collection."
+            ) from e
+
+        logger.info(
+            "Added mapping properties %s to Elasticsearch index '%s', "
+            "created by an older version",
+            sorted(missing),
+            index,
+        )
 
     async def search(
         self,
