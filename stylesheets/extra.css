@@ -1,0 +1,29 @@
+/* Slightly wider content area on desktop */
+@media screen and (min-width: 76.25em) {
+  .md-content__inner {
+    max-width: 1000px;
+  }
+}
+
+/* Prevent code elements from wrapping inside table cells */
+.md-typeset table code {
+  white-space: nowrap;
+}
+
+/* Feature card style for landing page grid */
+.feature-card {
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-radius: 0.4rem;
+  padding: 1.2rem 1.4rem;
+  transition: box-shadow 0.2s ease, border-color 0.2s ease;
+}
+
+.feature-card:hover {
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+  border-color: var(--md-primary-fg-color);
+}
+
+.feature-card h3 {
+  margin-top: 0;
+  color: var(--md-primary-fg-color);
+}
