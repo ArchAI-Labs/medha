@@ -25,11 +25,30 @@ try:
         TextField,
         VectorField,
     )
-    from redis.commands.search.indexDefinition import IndexDefinition, IndexType
     from redis.commands.search.query import Query
+
+    try:
+        # redis-py exposes this module under its snake_case name from 5.0.1 and
+        # dropped the camelCase spelling in 6.0. Accepting either keeps the
+        # backend working across the whole range instead of silently
+        # disappearing on a driver that is merely newer than expected.
+        from redis.commands.search.index_definition import IndexDefinition, IndexType
+    except ImportError:
+        # mypy analyses both branches, so the fallback always reads as a
+        # redefinition of the names bound above.
+        from redis.commands.search.indexDefinition import (  # type: ignore[no-redef]
+            IndexDefinition,
+            IndexType,
+        )
+
     HAS_REDIS = True
-except ImportError:
+    _REDIS_IMPORT_ERROR: str | None = None
+except ImportError as exc:
+    # Keep the reason. Reporting "install the package" to someone who already
+    # has it installed — the failure mode this replaced — sends them to fix
+    # the one thing that is not wrong.
     HAS_REDIS = False
+    _REDIS_IMPORT_ERROR = f"{type(exc).__name__}: {exc}"
 
 _TAG_ESCAPE_RE = re.compile(r'([,.<>{}\[\]"\':;!@#$%^&*()\-+=~|/\\])')
 _SAFE_NAME_RE = re.compile(r"[^a-zA-Z0-9_\-]")
@@ -107,7 +126,8 @@ class RedisVectorBackend(VectorStorageBackend):
     def __init__(self, settings: Any = None) -> None:
         if not HAS_REDIS:
             raise ConfigurationError(
-                "redis backend requires 'redis[hiredis]>=4.6'. "
+                "redis backend requires 'redis[hiredis]>=4.6' and numpy. "
+                f"Import failed with — {_REDIS_IMPORT_ERROR}. "
                 "Install with: pip install medha-archai[redis]"
             )
         from medha.config import Settings

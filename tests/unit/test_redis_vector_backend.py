@@ -14,6 +14,44 @@ from medha.exceptions import ConfigurationError, StorageError
 from medha.types import CacheEntry
 
 # ---------------------------------------------------------------------------
+# Driver availability
+# ---------------------------------------------------------------------------
+
+
+def test_backend_is_available_whenever_the_driver_imports():
+    """``redis`` importable and ``HAS_REDIS`` must not disagree.
+
+    They did. redis-py moved ``redis.commands.search.indexDefinition`` to
+    ``index_definition`` and dropped the camelCase spelling in 6.0, so on a
+    newer driver the availability check raised ImportError, ``HAS_REDIS`` fell
+    to False, and every use of the backend was refused — telling the user to
+    install the package they already had.
+
+    ``importorskip`` at the top of this module means the test only runs where
+    redis is present, which is precisely the condition being asserted.
+    """
+    from medha.backends.redis_vector import _REDIS_IMPORT_ERROR, HAS_REDIS
+
+    assert HAS_REDIS, (
+        f"redis {redis.__version__} imports fine but the backend reports "
+        f"itself unavailable — {_REDIS_IMPORT_ERROR}"
+    )
+
+
+def test_unavailable_backend_reports_the_real_cause():
+    """The refusal must name what actually failed, not just how to install."""
+    from medha.backends import redis_vector
+
+    with patch.object(redis_vector, "HAS_REDIS", False), patch.object(
+        redis_vector, "_REDIS_IMPORT_ERROR", "ImportError: no module named 'nope'"
+    ):
+        with pytest.raises(ConfigurationError) as excinfo:
+            redis_vector.RedisVectorBackend()
+
+    assert "no module named 'nope'" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
