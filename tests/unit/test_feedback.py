@@ -7,7 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from medha.config import Settings
-from medha.types import CacheEntry, CacheResult
+from medha.types import CacheEntry, CacheResult, SearchStrategy
 
 
 class TestFeedbackTypes:
@@ -97,6 +97,72 @@ class TestInMemoryBackendUpdateFeedback:
         )
 
         assert result == 0
+
+
+class TestSeveralEntriesPerQuestion:
+    """One question can map to several entries, and today they are indistinguishable.
+
+    ``store()`` takes the query as a separate argument, so nothing stops the
+    same question being stored with two different queries. Both entries then
+    carry the same normalized question *and* the same vector — the embedding
+    is computed from the question alone — so they tie at score 1.0 and which
+    one answers is decided by whatever order the backend returns ties in.
+
+    These tests pin the contract as it actually stands: *one of* the entries,
+    never *which one*. Issue #36 gives entries distinguishable metadata, which
+    is what makes a deterministic answer possible; when it lands, these
+    assertions get tightened deliberately rather than breaking by surprise.
+    """
+
+    QUESTION = "how many active users"
+    QUERIES = (
+        "SELECT count(*) FROM users WHERE active",
+        "SELECT count(*) FROM users WHERE active = true",
+        "SELECT count(*) FROM u WHERE flag",
+    )
+
+    async def _store_variants(self, medha) -> None:
+        for query in self.QUERIES:
+            await medha.store(self.QUESTION, query)
+
+    async def test_variants_are_kept_as_separate_entries(self, medha_memory):
+        await self._store_variants(medha_memory)
+        count = await medha_memory._backend.count(medha_memory._collection_name)
+        assert count == len(self.QUERIES)
+
+    async def test_search_answers_with_one_of_the_stored_queries(self, medha_memory):
+        await self._store_variants(medha_memory)
+        # Drop L1, which would otherwise short-circuit to the last write and
+        # hide the fact that the backend is the one resolving the tie.
+        await medha_memory.clear_caches()
+
+        hit = await medha_memory.search(self.QUESTION)
+
+        assert hit.strategy is not SearchStrategy.NO_MATCH
+        assert hit.generated_query in self.QUERIES, (
+            f"answered with a query that was never stored: {hit.generated_query!r}"
+        )
+
+    async def test_feedback_marks_exactly_one_entry(self, medha_memory):
+        """Not which one — that is undefined — but that it is not all of them."""
+        await self._store_variants(medha_memory)
+
+        assert await medha_memory.feedback(self.QUESTION, correct=False) is True
+
+        results, _ = await medha_memory._backend.scroll(
+            medha_memory._collection_name, limit=100
+        )
+        marked = [r for r in results if r.feedback_incorrect]
+        assert len(marked) == 1
+        assert marked[0].feedback_incorrect == 1
+
+    async def test_invalidate_still_removes_all_of_them(self, medha_memory):
+        """The one place ambiguity is already resolved: invalidate is exhaustive."""
+        await self._store_variants(medha_memory)
+
+        assert await medha_memory.invalidate(self.QUESTION) is True
+
+        assert await medha_memory._backend.count(medha_memory._collection_name) == 0
 
 
 class TestMedhaFeedback:

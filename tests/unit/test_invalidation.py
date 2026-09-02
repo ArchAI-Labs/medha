@@ -1,5 +1,6 @@
 """Unit tests for the selective invalidation API."""
 
+import asyncio
 import hashlib
 import uuid
 
@@ -187,6 +188,55 @@ class TestMedhaInvalidate:
     async def test_invalidate_returns_false_when_not_found(self, medha):
         result = await medha.invalidate("question never stored")
         assert result is False
+
+    async def test_invalidate_removes_every_duplicate(self, medha):
+        """One question can map to several entries, and all must go.
+
+        ``store()`` mints a new id per call, so storing the same question
+        twice leaves two entries. Deleting only the one
+        ``search_by_normalized_question()`` happens to return left the other
+        answering a question the caller had just invalidated — it came back as
+        a confident EXACT_MATCH.
+        """
+        question = "how many active users"
+        await medha.store(question, "SELECT count(*) FROM users WHERE active")
+        await medha.store(question, "SELECT count(*) FROM users WHERE active = true")
+        assert await medha._backend.count("inv_core") == 2
+
+        assert await medha.invalidate(question) is True
+
+        assert await medha._backend.count("inv_core") == 0
+        hit = await medha.search(question)
+        assert hit.strategy == SearchStrategy.NO_MATCH, (
+            f"invalidated question still answered by {hit.strategy.value}: "
+            f"{hit.generated_query!r}"
+        )
+
+    async def test_invalidate_terminates_on_stale_reads(self, medha):
+        """A backend that keeps serving a deleted entry must not loop forever.
+
+        Elasticsearch and Azure refresh asynchronously, so a lookup right
+        after a delete can still return the document just removed. The loop
+        stops when it sees an id it has already deleted rather than waiting
+        for the refresh.
+        """
+        await medha.store("how many users", "SELECT COUNT(*) FROM users")
+        backend = medha._backend
+        stale = await backend.search_by_normalized_question("inv_core", "how many users")
+        assert stale is not None
+
+        # Delete is a no-op and the lookup always returns the same entry:
+        # the worst case an eventually-consistent backend can present.
+        async def _never_deletes(collection_name, ids):
+            return None
+
+        async def _always_finds(collection_name, normalized_question):
+            return stale
+
+        backend.delete = _never_deletes
+        backend.search_by_normalized_question = _always_finds
+
+        assert await asyncio.wait_for(medha.invalidate("how many users"), timeout=5) is True
 
     async def test_invalidate_by_query_hash_removes_all_matching(self, medha):
         query = "SELECT COUNT(*) FROM users"

@@ -46,6 +46,26 @@ _HIT_STRATEGIES = frozenset({
     SearchStrategy.FUZZY_MATCH,
 })
 
+# Upper bound on how many entries one invalidate() call will remove. A question
+# mapping to more entries than this is pathological; the cap keeps a runaway
+# collection from turning a single call into an unbounded number of round trips.
+_INVALIDATE_MAX_ENTRIES = 1000
+
+
+def _dedup_key(result: CacheResult) -> str:
+    """Identity under which :meth:`Medha.dedup_collection` groups duplicates.
+
+    Two entries collapse into one when this key matches. Today that is the
+    query hash alone: entries that produce the same query text are the same
+    entry as far as the cache is concerned.
+
+    It lives in its own function because the identity is about to grow. Once
+    entries carry metadata, two rows with identical query text but different
+    metadata — the same SQL under two tenants, say — are distinct entries and
+    must not be collapsed into one.
+    """
+    return result.query_hash
+
 
 class _StatsCollector:
     """Thread-safe async collector for cache performance metrics."""
@@ -1097,39 +1117,74 @@ class Medha:
     # --- Invalidation API ---
 
     async def invalidate(self, question: str) -> bool:
-        """Invalidate a single cache entry by its original question.
+        """Invalidate every cache entry stored for *question*.
 
-        Finds the entry in the vector backend via normalized_question match,
-        deletes it, and removes the corresponding L1 key.
+        Entries are located by normalized-question match, deleted from the
+        vector backend, and the corresponding L1 key is removed.
+
+        One question can map to several entries: nothing enforces uniqueness
+        and ``store()`` mints a fresh id on every call, so storing the same
+        question twice leaves two entries behind. Since
+        ``search_by_normalized_question()`` returns only one arbitrary match,
+        it is called repeatedly until the question is gone — deleting one and
+        stopping would leave the rest serving a question the caller believes
+        it has just invalidated.
 
         Args:
-            question: Natural language question whose cached entry to remove.
+            question: Natural language question whose cached entries to remove.
 
         Returns:
-            True if an entry was found and deleted, False if not found.
+            True if at least one entry was found and deleted, False if none was.
         """
         normalized = normalize_question(question)
-        try:
-            result = await self._backend.search_by_normalized_question(
-                self._collection_name, normalized
-            )
-        except Exception:
-            logger.exception("invalidate: backend lookup failed for '%s'", question[:50])
-            return False
+        deleted_ids: set[str] = set()
+        capped = True
 
-        if result is None:
+        while len(deleted_ids) < _INVALIDATE_MAX_ENTRIES:
+            try:
+                result = await self._backend.search_by_normalized_question(
+                    self._collection_name, normalized
+                )
+            except Exception:
+                logger.exception("invalidate: backend lookup failed for '%s'", question[:50])
+                capped = False
+                break
+
+            # An id we have already deleted coming back means the backend is
+            # serving a stale read (Elasticsearch and Azure refresh
+            # asynchronously). Treating the repeat as the end of the run keeps
+            # the loop finite without waiting on a refresh.
+            if result is None or result.id in deleted_ids:
+                capped = False
+                break
+
+            try:
+                await self._backend.delete(self._collection_name, [result.id])
+            except Exception:
+                logger.exception("invalidate: backend delete failed for id='%s'", result.id)
+                capped = False
+                break
+
+            deleted_ids.add(result.id)
+
+        if capped:
+            logger.warning(
+                "invalidate: stopped at %d entries for '%s'; more may remain",
+                _INVALIDATE_MAX_ENTRIES,
+                question[:50],
+            )
+
+        if not deleted_ids:
             logger.debug("invalidate: no entry found for '%s'", question[:50])
             return False
 
-        try:
-            await self._backend.delete(self._collection_name, [result.id])
-        except Exception:
-            logger.exception("invalidate: backend delete failed for id='%s'", result.id)
-            return False
-
-        key = question_hash(question)
-        await self._l1_backend.invalidate(key)
-        logger.info("Invalidated entry for '%s' (id=%s)", question[:50], result.id)
+        await self._l1_backend.invalidate(question_hash(question))
+        logger.info(
+            "Invalidated %d entr%s for '%s'",
+            len(deleted_ids),
+            "y" if len(deleted_ids) == 1 else "ies",
+            question[:50],
+        )
         return True
 
     async def invalidate_by_query_hash(self, query_hash: str) -> int:
@@ -1224,14 +1279,23 @@ class Medha:
         Locates the entry by exact normalized-question match, increments
         feedback_correct or feedback_incorrect, and — if
         Settings.feedback_incorrect_threshold is set and the incorrect count
-        has reached it — automatically invalidates the entry.
+        has reached it — automatically invalidates the question.
+
+        When several entries share the question, the counter is applied to one
+        arbitrary match (see
+        ``VectorStorageBackend.search_by_normalized_question``), while the
+        auto-invalidation it can trigger removes all of them. Feedback is also
+        addressed by question, not by returned entry: in a misdirection — the
+        cache answering with an entry stored under a *different* question — the
+        asked question was never stored, so there is nothing to find and the
+        entry that actually answered is never penalised.
 
         Args:
             question: The original natural-language question.
             correct:  True → the cached query was correct; False → it was wrong.
 
         Returns:
-            True  if the entry was found and updated.
+            True  if an entry was found and updated.
             False if no entry exists for the question (expired, invalidated, or
                   never stored).
         """
@@ -1633,17 +1697,17 @@ class Medha:
                 offset=offset,
             )
             for r in results:
-                qhash = r.query_hash
-                if qhash not in seen:
-                    seen[qhash] = r
+                key = _dedup_key(r)
+                if key not in seen:
+                    seen[key] = r
                 else:
-                    existing = seen[qhash]
+                    existing = seen[key]
                     if strategy == "keep_latest":
                         r_ts = r.created_at
                         ex_ts = existing.created_at
                         if r_ts is not None and (ex_ts is None or r_ts > ex_ts):
                             to_delete.append(existing.id)
-                            seen[qhash] = r
+                            seen[key] = r
                         else:
                             to_delete.append(r.id)
                     else:

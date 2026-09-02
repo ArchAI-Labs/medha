@@ -126,10 +126,20 @@ class VectorStorageBackend(ABC):
     async def search_by_normalized_question(
         self, collection_name: str, normalized_question: str
     ) -> CacheResult | None:
-        """Find a single entry by exact normalized_question match.
+        """Find one entry by exact normalized_question match.
+
+        Nothing enforces uniqueness on ``normalized_question``, and
+        ``Medha.store()`` mints a new id on every call, so several entries can
+        share one normalized question. **Which** of them is returned is
+        backend-dependent and may differ between calls.
+
+        Two consequences for callers: one that must reach every match cannot
+        rely on a single call (``Medha.invalidate`` loops until the question is
+        gone), and one that must reach a *specific* entry cannot use this
+        method at all — it has no way to say which.
 
         Returns:
-            CacheResult if found, None otherwise.
+            One matching CacheResult, or None if nothing matches.
         """
         ...
 

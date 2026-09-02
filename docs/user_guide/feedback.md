@@ -34,6 +34,23 @@ A sync wrapper is available as `feedback_sync()`.
 
 Because the lookup is a plain text match, `feedback()` needs no working embedder — which is why the CLI can record feedback without loading a model.
 
+!!! warning "A question with several entries has no defined feedback target"
+    `store()` takes the query as a separate argument, so the same question can
+    be stored with two different queries. Both entries then carry the same
+    normalized question **and the same vector** — the embedding comes from the
+    question alone — so they tie at score 1.0, and which one answers a
+    `search()` is decided by the order the backend happens to return ties in.
+
+    `feedback()` marks exactly one of them, and not necessarily the one that
+    answered: it resolves the question through its own lookup, independently
+    of the search that produced the hit. `invalidate()` is the exception — it
+    removes all of them.
+
+    Until entries can be told apart, keep one query per question: overwrite by
+    calling `invalidate()` before `store()` rather than storing a second
+    variant. Distinguishable entries are tracked in
+    [issue #36](https://github.com/ArchAI-Labs/medha/issues/36).
+
 ---
 
 ## Counters
