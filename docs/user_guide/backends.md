@@ -21,6 +21,25 @@ Medha supports nine vector backends. Choose based on your infrastructure, persis
 
 ---
 
+## Metadata Filtering
+
+All ten backends store and return `CacheEntry.metadata`, so [metadata filters](metadata_filters.md) work everywhere. They differ only in **where** the filter is evaluated:
+
+| Backend | Filter evaluation |
+|---|---|
+| `qdrant` | Native, all value types |
+| `pgvector`, `vectorchord` | Native for strings (`jsonb @>`), Python for the rest |
+| `elasticsearch` | Native for strings (`term` on a `flattened` field), Python for the rest |
+| `chroma` | Native for strings and booleans, Python for the rest |
+| `lancedb` | Narrows the scan natively for strings, Python decides |
+| `memory`, `weaviate`, `azure_search`, `redis` | Python |
+
+Results are verified in Python whatever the engine did, so the answer is the same everywhere — this table is about speed and recall, not correctness. A Python-side filter only sees the candidates the vector search returned, so it over-fetches (`Settings.metadata_filter_overfetch`) and can miss a match ranked below that window.
+
+A custom backend opts in by storing `CacheEntry.metadata`, returning it on `CacheResult`, and setting `supports_metadata = True`; passing `filters` to one that has not raises `ConfigurationError`.
+
+---
+
 ## `memory` — In-Memory
 
 !!! info "Install"

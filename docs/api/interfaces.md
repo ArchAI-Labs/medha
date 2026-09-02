@@ -39,6 +39,8 @@ class MyBackend(VectorStorageBackend):
     async def close(self) -> None: ...
 ```
 
+Not every member is abstract. `load_stats()` / `save_stats()`, `search_filtered()` and the `supports_metadata` flag ship with defaults, so a backend written against an older release keeps working — it simply opts out of stats persistence and of [metadata filters](../user_guide/metadata_filters.md), the latter by refusing them rather than mishandling them.
+
 ::: medha.interfaces.storage.VectorStorageBackend
 
 ---
@@ -56,5 +58,12 @@ class MyL1Cache(L1CacheBackend):
     async def delete(self, key: str) -> None: ...
     async def clear(self) -> None: ...
 ```
+
+!!! warning "Override `invalidate_prefix()`"
+    `Medha.invalidate()` calls it to reach every key a question owns — one per
+    set of [metadata filters](../user_guide/metadata_filters.md) it has been
+    searched under. The default implementation clears the whole cache, which is
+    correct but blunt; a prefix scan restores per-key invalidation. Both
+    shipped backends override it.
 
 ::: medha.interfaces.l1_cache.L1CacheBackend

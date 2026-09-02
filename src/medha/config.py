@@ -382,6 +382,44 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- Metadata filters ---
+    metadata_filter_mode: Literal["strict", "soft"] = Field(
+        default="strict",
+        description=(
+            "How a metadata filter mismatch is handled. "
+            "'strict' (default) drops the candidate entirely, so a filtered "
+            "search that finds no entry with the requested scope returns "
+            "NO_MATCH and the caller falls back to the LLM — the safe answer "
+            "for date- or tenant-scoped questions. "
+            "'soft' keeps mismatching candidates but multiplies their "
+            "confidence by metadata_filter_soft_penalty, so they only survive "
+            "if they still clear the tier threshold. "
+            "Env var: MEDHA_METADATA_FILTER_MODE."
+        ),
+    )
+    metadata_filter_soft_penalty: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Confidence multiplier applied to a candidate that fails the "
+            "metadata filter when metadata_filter_mode='soft'. Ignored in "
+            "strict mode. Env var: MEDHA_METADATA_FILTER_SOFT_PENALTY."
+        ),
+    )
+    metadata_filter_overfetch: int = Field(
+        default=10,
+        ge=1,
+        le=100,
+        description=(
+            "Candidates retrieved per requested result when a backend filters "
+            "metadata in Python instead of pushing the filter down. Higher "
+            "values cost bandwidth but reduce the chance of missing a match "
+            "ranked below the unfiltered top-N. Ignored by backends that "
+            "filter natively. Env var: MEDHA_METADATA_FILTER_OVERFETCH."
+        ),
+    )
+
     # --- Batch operations ---
     batch_size: int = Field(default=100, ge=1, le=10000, description="Batch size for bulk upsert")
     batch_embed_concurrency: int = Field(

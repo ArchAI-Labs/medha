@@ -96,6 +96,21 @@ for tenant_id, m in instances.items():
 # [tenant_globex] SELECT COUNT(*) FROM globex_accounts
 ```
 
+### Or one collection with a tenant filter
+
+A collection per tenant is the strongest isolation there is: separate vector spaces, separate thresholds, and a tenant's entries are unreachable from another instance by construction. It also means one `Medha` instance, one collection and one set of settings per tenant, which stops scaling somewhere around a few hundred of them.
+
+[Metadata filters](metadata_filters.md) offer the other trade-off — one collection, the tenant carried on each entry:
+
+```python
+await cache.store("How many users?", "SELECT COUNT(*) FROM acme_users",
+                  metadata={"tenant": "acme"})
+
+hit = await cache.search("How many users do we have?", filters={"tenant": "acme"})
+```
+
+A search that declares a tenant only ever matches entries stored under it, and entries stored without one match no tenant at all. The isolation is enforced by the query rather than by the namespace, so it is only as strong as the caller passing the right filter — use collections when a mistake there would be a data leak, filters when the tenant count makes that impractical.
+
 ---
 
 ## Shared Embedder

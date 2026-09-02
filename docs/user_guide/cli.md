@@ -119,6 +119,15 @@ Query    : SELECT * FROM customers ORDER BY revenue DESC LIMIT 5
 
 Prints `No cache hit.` when nothing matches. Useful for answering "why did this question hit the wrong entry?" without instrumenting your application.
 
+`--filter KEY=VALUE` (short `-f`) restricts the search to entries whose metadata carries that pair. Repeat it to require several:
+
+```bash
+medha search "revenue yesterday" --filter resolved_date=2026-08-12
+medha search "revenue" -f date=2026-08-12 -f tenant=acme
+```
+
+Values are compared as strings, so an entry stored with `{"hour": 10}` is not reachable from the command line — no coercion is attempted, because guessing would break a tenant genuinely named `10`. `--json` reports the scope that answered under `metadata`. See [Metadata Filters](metadata_filters.md).
+
 ---
 
 ### `medha health`

@@ -116,8 +116,11 @@ Medha is configured through the `Settings` class, which is backed by Pydantic Se
     | `validate_on_start` | `bool` | `True` | When `True`, `start()` probes the backend with `count()` before returning, surfacing connectivity issues early. Set to `False` to skip (e.g. in unit tests). |
     | `feedback_incorrect_threshold` | `int \| None` | `None` | Auto-invalidate an entry once it accumulates this many `correct=False` reports; `None` disables it. See [Feedback Loop](feedback.md#auto-invalidation). |
     | `feedback_boost_factor` | `float` | `0.0` | When `> 0`, raises a candidate's similarity score in proportion to its positive-feedback trust. `0.0` disables boosting. See [Feedback Loop](feedback.md#score-boosting). |
+    | `metadata_filter_mode` | `"strict" \| "soft"` | `"strict"` | Whether a metadata filter mismatch drops the candidate or only lowers its confidence. See [Metadata Filters](metadata_filters.md#strict-and-soft). |
+    | `metadata_filter_soft_penalty` | `float` | `0.5` | Confidence multiplier applied to a mismatching candidate in `soft` mode. Ignored in `strict`. |
+    | `metadata_filter_overfetch` | `int` | `10` | Candidates retrieved per requested result when the backend filters metadata in Python rather than pushing the filter down. |
 
-    **Environment variable prefix:** `MEDHA_DEFAULT_TTL_SECONDS`, `MEDHA_CLEANUP_*`, `MEDHA_ENABLE_BACKGROUND_CLEANUP`, `MEDHA_VALIDATE_ON_START`, `MEDHA_FEEDBACK_*`
+    **Environment variable prefix:** `MEDHA_DEFAULT_TTL_SECONDS`, `MEDHA_CLEANUP_*`, `MEDHA_ENABLE_BACKGROUND_CLEANUP`, `MEDHA_VALIDATE_ON_START`, `MEDHA_FEEDBACK_*`, `MEDHA_METADATA_FILTER_*`
 
 ??? info "Embedder Selection"
 

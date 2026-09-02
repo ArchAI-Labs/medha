@@ -11,6 +11,7 @@ from medha.backends._escape import quote_sql_literal
 from medha.exceptions import ConfigurationError, StorageError, StorageInitializationError
 from medha.interfaces.storage import VectorStorageBackend
 from medha.types import CacheEntry, CacheResult, PersistedStats
+from medha.utils.metadata import dumps_metadata, loads_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +39,7 @@ _SCALAR_FIELDS = [
     "id", "original_question", "normalized_question", "generated_query",
     "query_hash", "response_summary", "template_id", "usage_count",
     "feedback_correct", "feedback_incorrect",
-    "created_at", "expires_at",
+    "created_at", "expires_at", "metadata_json",
 ]
 
 
@@ -99,6 +100,7 @@ def _doc_to_result(doc: dict[str, Any], score: float) -> CacheResult:
         feedback_incorrect=doc.get("feedback_incorrect") or 0,
         created_at=_parse_dt(doc.get("created_at")),
         expires_at=_parse_dt(doc.get("expires_at")),
+        metadata=loads_metadata(doc.get("metadata_json")),
     )
 
 
@@ -116,14 +118,56 @@ def _entry_to_doc(entry: CacheEntry) -> dict[str, Any]:
         "feedback_incorrect": entry.feedback_incorrect,
         "created_at": _dt_to_iso(entry.created_at),
         "vector": entry.vector,
+        "metadata_json": dumps_metadata(entry.metadata),
     }
     if entry.expires_at is not None:
         doc["expires_at"] = _dt_to_iso(entry.expires_at)
     return doc
 
 
+def _index_fields(dimension: int) -> list[Any]:
+    """The fields an index is expected to declare.
+
+    Defined once so ``initialize()`` can both create an index with them and
+    check an existing index against them. Adding a field here is what makes
+    older indices receive it on their next ``start()``.
+
+    Keep in step with ``_SCALAR_FIELDS`` above, which is the projection asked
+    for on every read: a field declared here but missing there is stored and
+    never returned.
+    """
+    return [
+        SimpleField(name="id", type=SearchFieldDataType.String, key=True, filterable=True),
+        SearchableField(name="original_question", analyzer_name="standard.lucene"),
+        SimpleField(name="normalized_question", type=SearchFieldDataType.String, filterable=True),
+        SimpleField(name="generated_query", type=SearchFieldDataType.String),
+        SimpleField(name="query_hash", type=SearchFieldDataType.String, filterable=True),
+        SimpleField(name="response_summary", type=SearchFieldDataType.String, nullable=True),
+        SimpleField(name="template_id", type=SearchFieldDataType.String, filterable=True, nullable=True),
+        SimpleField(name="usage_count", type=SearchFieldDataType.Int32, filterable=True),
+        SimpleField(name="feedback_correct", type=SearchFieldDataType.Int32, filterable=True),
+        SimpleField(name="feedback_incorrect", type=SearchFieldDataType.Int32, filterable=True),
+        SimpleField(name="created_at", type=SearchFieldDataType.DateTimeOffset, filterable=True, sortable=True),
+        SimpleField(name="expires_at", type=SearchFieldDataType.DateTimeOffset, filterable=True, nullable=True),
+        # Not filterable: OData cannot look inside a JSON string, so the
+        # metadata filter runs as the base class post-filter. Filtering it
+        # natively would mean a field per key, which the index cannot declare
+        # ahead of the keys a caller invents.
+        SimpleField(name="metadata_json", type=SearchFieldDataType.String, nullable=True),
+        SearchField(
+            name="vector",
+            type=SearchFieldDataType.Collection(SearchFieldDataType.Single),
+            searchable=True,
+            vector_search_dimensions=dimension,
+            vector_search_profile_name="medha-hnsw-profile",
+        ),
+    ]
+
+
 class AzureSearchBackend(VectorStorageBackend):
     """Azure AI Search backend. Requires azure-search-documents>=11.4,<12."""
+
+    supports_metadata = True
 
     def __init__(self, settings: Any = None) -> None:
         if not HAS_AZURE_SEARCH:
@@ -183,7 +227,8 @@ class AzureSearchBackend(VectorStorageBackend):
         endpoint = self._settings.azure_search_endpoint
 
         try:
-            await self._index_client.get_index(index_name)
+            existing = await self._index_client.get_index(index_name)
+            await self._reconcile_index(existing, index_name, dimension)
             # Index already exists — create client and return
             if collection_name not in self._search_clients:
                 self._search_clients[collection_name] = AsyncSearchClient(
@@ -192,6 +237,8 @@ class AzureSearchBackend(VectorStorageBackend):
             return
         except ResourceNotFoundError:
             pass
+        except StorageInitializationError:
+            raise
         except HttpResponseError as e:
             raise StorageInitializationError(
                 f"Failed to check Azure Search index '{index_name}': {e}"
@@ -205,28 +252,11 @@ class AzureSearchBackend(VectorStorageBackend):
                     algorithm_configuration_name="medha-hnsw",
                 )],
             )
-            fields = [
-                SimpleField(name="id", type=SearchFieldDataType.String, key=True, filterable=True),
-                SearchableField(name="original_question", analyzer_name="standard.lucene"),
-                SimpleField(name="normalized_question", type=SearchFieldDataType.String, filterable=True),
-                SimpleField(name="generated_query", type=SearchFieldDataType.String),
-                SimpleField(name="query_hash", type=SearchFieldDataType.String, filterable=True),
-                SimpleField(name="response_summary", type=SearchFieldDataType.String, nullable=True),
-                SimpleField(name="template_id", type=SearchFieldDataType.String, filterable=True, nullable=True),
-                SimpleField(name="usage_count", type=SearchFieldDataType.Int32, filterable=True),
-                SimpleField(name="feedback_correct", type=SearchFieldDataType.Int32, filterable=True),
-                SimpleField(name="feedback_incorrect", type=SearchFieldDataType.Int32, filterable=True),
-                SimpleField(name="created_at", type=SearchFieldDataType.DateTimeOffset, filterable=True, sortable=True),
-                SimpleField(name="expires_at", type=SearchFieldDataType.DateTimeOffset, filterable=True, nullable=True),
-                SearchField(
-                    name="vector",
-                    type=SearchFieldDataType.Collection(SearchFieldDataType.Single),
-                    searchable=True,
-                    vector_search_dimensions=dimension,
-                    vector_search_profile_name="medha-hnsw-profile",
-                ),
-            ]
-            index = SearchIndex(name=index_name, fields=fields, vector_search=vector_search)
+            index = SearchIndex(
+                name=index_name,
+                fields=_index_fields(dimension),
+                vector_search=vector_search,
+            )
             await self._index_client.create_index(index)
             logger.info("Created Azure Search index '%s'", index_name)
         except HttpResponseError as e:
@@ -236,6 +266,49 @@ class AzureSearchBackend(VectorStorageBackend):
 
         self._search_clients[collection_name] = AsyncSearchClient(
             endpoint, index_name, self._credential, api_version=api_version
+        )
+
+    async def _reconcile_index(
+        self, existing: Any, index_name: str, dimension: int
+    ) -> None:
+        """Add fields an index created by an older version is missing.
+
+        ``initialize()`` returned as soon as ``get_index`` succeeded, so an
+        index built by an earlier version never gained the fields declared
+        since. 0.5.0 met this with the feedback counters and told users to
+        recreate the index, on the understanding that Azure AI Search cannot
+        add fields to a live one. The code has never actually attempted it —
+        only ``create_index`` is called anywhere — while Azure documents
+        adding a field as a non-breaking index update. So try it.
+
+        Only appends. Existing fields are carried through untouched, which is
+        the part Azure genuinely does refuse to change.
+        """
+        if self._index_client is None:
+            raise StorageError("Not connected. Call connect() first.")
+
+        current = list(existing.fields or [])
+        have = {field.name for field in current}
+        missing = [field for field in _index_fields(dimension) if field.name not in have]
+        if not missing:
+            return
+
+        names = [field.name for field in missing]
+        try:
+            existing.fields = current + missing
+            await self._index_client.create_or_update_index(existing)
+        except Exception as e:
+            raise StorageInitializationError(
+                f"Azure AI Search index '{index_name}' was created by an older "
+                f"version of medha and is missing the fields {names}. Adding them "
+                f"failed ({e}). Recreate the index before using this collection — "
+                f"documents supplying those fields are rejected."
+            ) from e
+
+        logger.info(
+            "Added fields %s to Azure Search index '%s', created by an older version",
+            names,
+            index_name,
         )
 
     def _get_client(self, collection_name: str) -> AsyncSearchClient:

@@ -12,6 +12,7 @@ from medha.config import Settings
 from medha.core import Medha
 from medha.exceptions import ConfigurationError, StorageError
 from medha.interfaces.embedder import BaseEmbedder
+from medha.types import MetadataDict
 
 app = typer.Typer(help="Medha cache management CLI.")
 
@@ -209,6 +210,29 @@ def stats(
     asyncio.run(_run())
 
 
+def _parse_filters(raw: list[str] | None) -> MetadataDict:
+    """Turn repeated ``--filter key=value`` options into a metadata filter.
+
+    Everything the shell hands over is a string, and no attempt is made to
+    guess otherwise: coercing ``10`` to an integer would break a tenant
+    genuinely named "10", and ``metadata_matches`` compares types strictly. An
+    entry stored with a number is therefore not reachable from this flag —
+    which is worth knowing, and better than a filter that sometimes guesses
+    right.
+
+    The value may contain ``=``; only the first one separates.
+    """
+    filters: MetadataDict = {}
+    for item in raw or []:
+        key, sep, value = item.partition("=")
+        if not sep or not key:
+            raise typer.BadParameter(
+                f"--filter expects KEY=VALUE, got {item!r}", param_hint="--filter"
+            )
+        filters[key] = value
+    return filters
+
+
 @app.command()
 def search(
     question: str = typer.Argument(..., help="Natural-language question to look up."),
@@ -216,11 +240,20 @@ def search(
         None, "--collection", "-c",
         help="Collection to search. Defaults to MEDHA_COLLECTION (or 'default').",
     ),
+    filters: list[str] = typer.Option(
+        None, "--filter", "-f", metavar="KEY=VALUE",
+        help=(
+            "Only accept an entry whose metadata carries KEY=VALUE. Repeat to "
+            "require several. Values are compared as strings, so an entry "
+            "stored with a number does not match here."
+        ),
+    ),
     json_output: bool = typer.Option(False, "--json", help="Print result as JSON."),
 ) -> None:
     """Search the cache for a question and print the best match."""
     settings = Settings()
     coll = collection or settings.collection
+    parsed_filters = _parse_filters(filters)
 
     if settings.embedder_type == "_noop":
         typer.echo(
@@ -239,9 +272,15 @@ def search(
 
     async def _run():
         async with _build_medha(coll, settings) as m:
-            return await m.search(question)
+            return await m.search(question, filters=parsed_filters or None)
 
-    result = asyncio.run(_run())
+    try:
+        result = asyncio.run(_run())
+    except (ConfigurationError, ValueError) as exc:
+        # A backend that cannot store metadata, or an unusable filter. Both are
+        # raised before the search runs, and both are the caller's to fix.
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
 
     if json_output:
         import json
@@ -250,6 +289,7 @@ def search(
             "score": result.confidence,
             "generated_query": result.generated_query,
             "response_summary": result.response_summary,
+            "metadata": result.metadata,
             "hit": result.strategy.value != "no_match",
         }, indent=2))
     else:

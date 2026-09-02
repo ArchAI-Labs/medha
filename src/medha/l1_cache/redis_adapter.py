@@ -5,13 +5,35 @@ Requires: ``pip install medha[redis]``
 
 from __future__ import annotations
 
-import json
 import logging
 
 from medha.interfaces.l1_cache import L1CacheBackend
-from medha.types import CacheHit, SearchStrategy
+from medha.types import CacheHit
 
 logger = logging.getLogger(__name__)
+
+
+def _serialise(hit: CacheHit) -> str:
+    """Serialise a ``CacheHit`` to its JSON form.
+
+    Derived from the model rather than a hand-written field list, so every
+    field ``CacheHit`` gains travels through the shared L1 automatically.
+    The whitelist this replaced silently dropped ``expires_at``, which meant
+    the per-entry expiry check in ``Medha._check_l1_cache`` never fired on
+    this backend: an expired entry was served until the Redis-level ``ttl``
+    (a single global value, when set at all) removed the key.
+    """
+    return hit.model_dump_json()
+
+
+def _deserialise(data: str) -> CacheHit:
+    """Rebuild a ``CacheHit`` from its JSON form.
+
+    Payloads written by an earlier version simply lack the newer keys and
+    fall back to the model defaults, so a populated cache keeps working
+    across the upgrade.
+    """
+    return CacheHit.model_validate_json(data)
 
 
 class RedisL1Cache(L1CacheBackend):
@@ -60,23 +82,10 @@ class RedisL1Cache(L1CacheBackend):
         return f"{self._prefix}:{key}"
 
     def _serialise(self, hit: CacheHit) -> str:
-        return json.dumps({
-            "generated_query": hit.generated_query,
-            "response_summary": hit.response_summary,
-            "confidence": hit.confidence,
-            "strategy": hit.strategy.value if hit.strategy else None,
-            "template_used": hit.template_used,
-        })
+        return _serialise(hit)
 
     def _deserialise(self, data: str) -> CacheHit:
-        payload = json.loads(data)
-        return CacheHit(
-            generated_query=payload.get("generated_query"),
-            response_summary=payload.get("response_summary"),
-            confidence=payload.get("confidence", 1.0),
-            strategy=SearchStrategy(payload["strategy"]) if payload.get("strategy") else SearchStrategy.NO_MATCH,
-            template_used=payload.get("template_used"),
-        )
+        return _deserialise(data)
 
     # ------------------------------------------------------------------
     # L1CacheBackend interface
@@ -118,6 +127,30 @@ class RedisL1Cache(L1CacheBackend):
             await self._client.delete(self._key(key))
         except Exception as exc:
             logger.warning("RedisL1Cache.invalidate failed (key=%s…): %s", key[:8], exc)
+
+    async def invalidate_prefix(self, prefix: str) -> None:
+        """Delete the keys under *prefix* with a cursor scan, not a flush.
+
+        ``scan_iter`` is used rather than ``keys``: it does not block the
+        server on a large keyspace, and the base-class default this replaces
+        would have dropped every other instance's entries too.
+
+        Keys are collected and deleted in batches so a scan that matches
+        thousands of entries does not issue thousands of round-trips.
+        """
+        batch: list[str] = []
+        try:
+            async for rkey in self._client.scan_iter(match=f"{self._key(prefix)}*", count=500):
+                batch.append(rkey)
+                if len(batch) >= 500:
+                    await self._client.delete(*batch)
+                    batch.clear()
+            if batch:
+                await self._client.delete(*batch)
+        except Exception as exc:
+            logger.warning(
+                "RedisL1Cache.invalidate_prefix failed (prefix=%s…): %s", prefix[:8], exc
+            )
 
     @property
     def size(self) -> int:

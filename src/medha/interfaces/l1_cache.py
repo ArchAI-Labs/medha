@@ -37,6 +37,23 @@ class L1CacheBackend(ABC):
         """Remove a single entry by *key*. No-op if key is absent."""
         ...
 
+    async def invalidate_prefix(self, prefix: str) -> None:
+        """Remove every entry whose key starts with *prefix*.
+
+        A search that declares metadata filters is cached under a key derived
+        from the question *and* those filters, so one question can own several
+        L1 keys sharing the question's hash as their prefix. Invalidating that
+        question has to reach all of them, or a filtered lookup keeps being
+        served an entry the caller has just invalidated.
+
+        The default clears the whole cache. It is blunt — correctness before
+        efficiency, since leaving stale entries behind is the one outcome
+        invalidation must not have — and both shipped backends override it
+        with a real prefix scan. A third-party backend keeps working unchanged,
+        at the cost of a full flush on ``Medha.invalidate()``.
+        """
+        await self.clear()
+
     async def invalidate_all(self) -> None:
         """Remove all entries. Delegates to :meth:`clear` by default."""
         await self.clear()

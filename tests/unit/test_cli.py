@@ -430,6 +430,100 @@ class TestCliSearch:
 
 
 @pytest.mark.cli
+class TestCliSearchFilters:
+    """`medha search --filter key=value`."""
+
+    def _invoke(self, mock_medha, args):
+        env = {"MEDHA_EMBEDDER_TYPE": "openai", "OPENAI_API_KEY": "test-key"}
+        with _patch_build_medha(mock_medha):
+            with patch("medha.cli._app._resolve_embedder", return_value=_make_mock_embedder()):
+                with patch.dict(os.environ, env):
+                    return runner.invoke(app, args)
+
+    def test_filter_reaches_search(self):
+        mock_medha = _make_mock_medha()
+        mock_medha.search = AsyncMock(return_value=CacheHit(strategy=SearchStrategy.NO_MATCH))
+
+        result = self._invoke(
+            mock_medha, ["search", "revenue", "--filter", "resolved_date=2026-08-12"]
+        )
+
+        assert result.exit_code == 0
+        assert mock_medha.search.await_args.kwargs["filters"] == {
+            "resolved_date": "2026-08-12"
+        }
+
+    def test_several_filters_are_all_required(self):
+        mock_medha = _make_mock_medha()
+        mock_medha.search = AsyncMock(return_value=CacheHit(strategy=SearchStrategy.NO_MATCH))
+
+        self._invoke(
+            mock_medha,
+            ["search", "revenue", "-f", "date=2026-08-12", "-f", "tenant=acme"],
+        )
+
+        assert mock_medha.search.await_args.kwargs["filters"] == {
+            "date": "2026-08-12",
+            "tenant": "acme",
+        }
+
+    def test_no_filter_passes_none(self):
+        """An unfiltered search must stay exactly what it was."""
+        mock_medha = _make_mock_medha()
+        mock_medha.search = AsyncMock(return_value=CacheHit(strategy=SearchStrategy.NO_MATCH))
+
+        self._invoke(mock_medha, ["search", "revenue"])
+
+        assert mock_medha.search.await_args.kwargs["filters"] is None
+
+    def test_only_the_first_equals_separates(self):
+        mock_medha = _make_mock_medha()
+        mock_medha.search = AsyncMock(return_value=CacheHit(strategy=SearchStrategy.NO_MATCH))
+
+        self._invoke(mock_medha, ["search", "revenue", "-f", "expr=a=b"])
+
+        assert mock_medha.search.await_args.kwargs["filters"] == {"expr": "a=b"}
+
+    @pytest.mark.parametrize("bad", ["nokey", "=novalue"])
+    def test_malformed_filter_is_rejected(self, bad):
+        mock_medha = _make_mock_medha()
+        mock_medha.search = AsyncMock(return_value=CacheHit(strategy=SearchStrategy.NO_MATCH))
+
+        result = self._invoke(mock_medha, ["search", "revenue", "-f", bad])
+
+        assert result.exit_code != 0
+        mock_medha.search.assert_not_awaited()
+
+    def test_backend_without_metadata_support_exits_1(self):
+        mock_medha = _make_mock_medha()
+        mock_medha.search = AsyncMock(
+            side_effect=ConfigurationError("Foo does not store entry metadata")
+        )
+
+        result = self._invoke(mock_medha, ["search", "revenue", "-f", "date=2026-08-12"])
+
+        assert result.exit_code == 1
+        assert "does not store entry metadata" in result.output
+
+    def test_json_output_reports_the_scope_served(self):
+        hit = CacheHit(
+            generated_query="SELECT 1",
+            strategy=SearchStrategy.EXACT_MATCH,
+            confidence=0.99,
+            metadata={"resolved_date": "2026-08-12"},
+        )
+        mock_medha = _make_mock_medha()
+        mock_medha.search = AsyncMock(return_value=hit)
+
+        result = self._invoke(
+            mock_medha,
+            ["search", "revenue", "--json", "-f", "resolved_date=2026-08-12"],
+        )
+
+        assert json.loads(result.output)["metadata"] == {"resolved_date": "2026-08-12"}
+
+
+@pytest.mark.cli
 class TestCliStatsJson:
     def test_stats_json_output(self):
         mock_medha = _make_mock_medha()

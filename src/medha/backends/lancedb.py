@@ -1,6 +1,8 @@
 """LanceDBBackend — LanceDB vector storage backend."""
 
 import contextlib
+import inspect
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Any
@@ -8,13 +10,29 @@ from typing import Any
 from medha.backends._escape import quote_sql_literal
 from medha.exceptions import ConfigurationError, StorageError, StorageInitializationError
 from medha.interfaces.storage import VectorStorageBackend
-from medha.types import CacheEntry, CacheResult, PersistedStats
+from medha.types import CacheEntry, CacheResult, MetadataDict, PersistedStats
+from medha.utils.metadata import (
+    dumps_metadata,
+    filter_fetch_size,
+    loads_metadata,
+    split_filters,
+    verify_filters,
+)
 
 logger = logging.getLogger(__name__)
 
+# pyarrow is imported separately from lancedb, though the backend needs both.
+# The schema helpers below are pure functions over pyarrow schemas, and keeping
+# their dependency independent means they stay importable — and testable —
+# wherever pyarrow is present, without a lancedb install or any storage.
+try:
+    import pyarrow as pa
+    HAS_PYARROW = True
+except ImportError:
+    HAS_PYARROW = False
+
 try:
     import lancedb
-    import pyarrow as pa
     HAS_LANCEDB = True
 except ImportError:
     HAS_LANCEDB = False
@@ -46,7 +64,44 @@ def _build_schema(dimension: int) -> "pa.Schema":
         pa.field("feedback_incorrect", pa.int64()),
         pa.field("created_at", pa.string()),
         pa.field("expires_at", pa.string()),
+        # A JSON string, not a struct: LanceDB fixes the schema at creation and
+        # metadata keys are only known per entry, so a struct would need a
+        # schema migration on every new key.
+        pa.field("metadata_json", pa.string()),
     ])
+
+
+def _missing_fields(existing: "pa.Schema", expected: "pa.Schema") -> list["pa.Field"]:
+    """Fields of *expected* that *existing* does not carry.
+
+    ``create_table(..., exist_ok=True)`` opens a table that is already there and
+    ignores the schema it was handed, so a table written by an older version
+    keeps exactly the columns it was created with. Every column added to
+    ``_build_schema`` since then is absent, and the first upsert supplying one
+    fails on the whole batch.
+
+    Matching on name alone is enough: columns are only ever appended to the
+    schema, never retyped. A table carrying *extra* columns — written by a
+    newer version — is left alone.
+    """
+    have = set(existing.names)
+    return [field for field in expected if field.name not in have]
+
+
+def _backfill_expression(field: "pa.Field") -> str:
+    """SQL literal LanceDB stores in *field* for rows that predate it.
+
+    ``add_columns`` takes an expression per column rather than a default, so
+    each one needs the value its reader already assumes for a missing column:
+    ``_row_to_result`` coerces counters through ``int(... or 0)`` and text
+    through ``... or None``, so zero and the empty string keep old rows
+    reading exactly as they do now.
+    """
+    if pa.types.is_integer(field.type):
+        return "0"
+    if pa.types.is_floating(field.type):
+        return "0.0"
+    return "''"
 
 
 def _entry_to_row(entry: CacheEntry) -> dict[str, Any]:
@@ -64,6 +119,7 @@ def _entry_to_row(entry: CacheEntry) -> dict[str, Any]:
         "feedback_incorrect": entry.feedback_incorrect,
         "created_at": entry.created_at.isoformat() if entry.created_at else "",
         "expires_at": entry.expires_at.isoformat() if entry.expires_at else "",
+        "metadata_json": dumps_metadata(entry.metadata),
     }
 
 
@@ -90,6 +146,7 @@ def _row_to_result(row: dict[str, Any], score: float) -> CacheResult:
         feedback_incorrect=int(row.get("feedback_incorrect") or 0),
         created_at=created_at,
         expires_at=expires_at,
+        metadata=loads_metadata(row.get("metadata_json")),
     )
 
 
@@ -113,10 +170,16 @@ class LanceDBBackend(VectorStorageBackend):
     require the appropriate credentials to be set in the environment.
     """
 
+    supports_metadata = True
+
     def __init__(self, settings: Any = None) -> None:
-        if not HAS_LANCEDB:
+        if not (HAS_LANCEDB and HAS_PYARROW):
+            missing = " and ".join(
+                name for name, present in (("lancedb>=0.6", HAS_LANCEDB), ("pyarrow", HAS_PYARROW))
+                if not present
+            )
             raise ConfigurationError(
-                "lancedb backend requires 'lancedb>=0.6'. "
+                f"lancedb backend requires {missing}. "
                 "Install with: pip install medha-archai[lancedb]"
             )
         from medha.config import Settings
@@ -149,11 +212,59 @@ class LanceDBBackend(VectorStorageBackend):
         self._dimensions[collection_name] = dimension
         try:
             table = await self._db.create_table(table_name, schema=schema, exist_ok=True)
+            await self._reconcile_schema(table, table_name, schema)
             self._tables[collection_name] = table
+        except StorageInitializationError:
+            raise
         except Exception as e:
             raise StorageInitializationError(
                 f"Failed to initialize LanceDB table '{table_name}': {e}"
             ) from e
+
+    async def _reconcile_schema(
+        self, table: Any, table_name: str, expected: "pa.Schema"
+    ) -> None:
+        """Add the columns a table created by an older version is missing.
+
+        ``initialize()`` is idempotent about a table's *existence* but was not
+        about its *shape*: it handed ``create_table`` the current schema and
+        ``exist_ok=True`` silently ignored it. The mismatch then surfaced at the
+        first upsert, far from its cause and with the whole batch failing.
+
+        Failing here instead, naming the columns, is the floor. Adding them is
+        the repair.
+        """
+        existing = table.schema
+        # The async table exposes schema() as a coroutine method; the sync one
+        # exposes it as a property. Accept either rather than pinning a shape.
+        if callable(existing):
+            existing = existing()
+            if inspect.isawaitable(existing):
+                existing = await existing
+
+        missing = _missing_fields(existing, expected)
+        if not missing:
+            return
+
+        names = [field.name for field in missing]
+        try:
+            await table.add_columns(
+                {field.name: _backfill_expression(field) for field in missing}
+            )
+        except Exception as e:
+            raise StorageInitializationError(
+                f"LanceDB table '{table_name}' was created by an older version of "
+                f"medha and is missing {names}. Adding the columns automatically "
+                f"failed ({e}). Add them by hand or recreate the table before using "
+                f"this collection — otherwise every upsert that supplies one of them "
+                f"fails."
+            ) from e
+
+        logger.info(
+            "Added %s to LanceDB table '%s', created by an older version",
+            names,
+            table_name,
+        )
 
     async def close(self) -> None:
         self._tables.clear()
@@ -279,6 +390,28 @@ class LanceDBBackend(VectorStorageBackend):
     # Core operations
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _build_where(pushable: MetadataDict) -> str:
+        """The ``where`` expression: not expired, and narrowed by *pushable*.
+
+        The TTL test is parenthesised. It is an ``OR``, and appending
+        ``AND <metadata>`` to a bare ``a OR b`` would bind as
+        ``a OR (b AND metadata)`` — entries with no expiry would slip past the
+        metadata condition entirely.
+        """
+        clause = f"(expires_at = '' OR expires_at > '{_now_iso()}')"
+        for key, value in pushable.items():
+            # metadata_json holds canonical JSON: sorted keys, no spaces. So a
+            # matching row contains this exact pair as a substring, and the
+            # encoder here has to be the one that wrote it — hence
+            # ensure_ascii=False, matching canonical_json.
+            pair = (
+                f"{json.dumps(key, ensure_ascii=False)}:"
+                f"{json.dumps(value, ensure_ascii=False)}"
+            )
+            clause += f" AND metadata_json LIKE '%{quote_sql_literal(pair)}%'"
+        return clause
+
     async def search(
         self,
         collection_name: str,
@@ -286,16 +419,49 @@ class LanceDBBackend(VectorStorageBackend):
         limit: int = 5,
         score_threshold: float = 0.0,
     ) -> list[CacheResult]:
+        return await self.search_filtered(
+            collection_name, vector, limit, score_threshold, filters=None
+        )
+
+    async def search_filtered(
+        self,
+        collection_name: str,
+        vector: list[float],
+        limit: int = 5,
+        score_threshold: float = 0.0,
+        filters: MetadataDict | None = None,
+        overfetch: int = 10,
+    ) -> list[CacheResult]:
+        """Search, narrowing the scan by a substring test on the metadata JSON.
+
+        LanceDB has no JSON accessor to filter on, so the pushdown is a
+        ``LIKE`` over the encoded blob. That makes it a *narrowing* step rather
+        than a decision: it never hides a row that matches — a matching row
+        contains the pair verbatim — but a value carrying a ``%`` or a ``_``
+        matches more rows than it should, since those are LIKE wildcards.
+
+        So the fetch is widened whenever any filter is present, not only when
+        something is left over for Python: a false positive ranked above a true
+        match must not be able to fill up ``limit``. The Python pass then has
+        the last word, as everywhere else.
+
+        Only strings are pushed down. A number's JSON spelling is not unique
+        enough to match on — ``10`` and ``10.0`` are the same value to
+        ``metadata_matches`` and different substrings here.
+
+        Raises:
+            StorageError: If the search fails.
+        """
         table = self._get_table(collection_name)
-        now_iso = _now_iso()
-        where = f"expires_at = '' OR expires_at > '{now_iso}'"
+        pushable, _ = split_filters(filters)
+        fetch = filter_fetch_size(limit, filters or {}, overfetch)
         metric: str = self._settings.lancedb_metric
         try:
             rows: list[dict[str, Any]] = await (
                 table.vector_search(vector)
                 .distance_type(metric)
-                .where(where)
-                .limit(limit)
+                .where(self._build_where(pushable))
+                .limit(fetch)
                 .to_list()
             )
         except Exception as e:
@@ -307,7 +473,7 @@ class LanceDBBackend(VectorStorageBackend):
             score = max(0.0, min(1.0, score))
             if score >= score_threshold:
                 out.append(_row_to_result(row, score))
-        return out
+        return verify_filters(out, filters, limit)
 
     async def upsert(self, collection_name: str, entries: list[CacheEntry]) -> None:
         if not entries:

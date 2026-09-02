@@ -92,6 +92,7 @@ nav:
       - Embedders: user_guide/embedders.md
       - Templates: user_guide/templates.md
       - Parameter Extraction: user_guide/parameter_extraction.md
+      - Metadata Filters: user_guide/metadata_filters.md
       - Multi-Tenancy: user_guide/multi_tenancy.md
       - Security: user_guide/security.md
       - TTL & Lifecycle: user_guide/ttl_and_lifecycle.md

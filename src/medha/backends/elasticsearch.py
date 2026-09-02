@@ -8,7 +8,13 @@ from typing import Any
 
 from medha.exceptions import ConfigurationError, StorageError, StorageInitializationError
 from medha.interfaces.storage import VectorStorageBackend
-from medha.types import CacheEntry, CacheResult, PersistedStats
+from medha.types import CacheEntry, CacheResult, MetadataDict, PersistedStats
+from medha.utils.metadata import (
+    filter_fetch_size,
+    loads_metadata,
+    split_filters,
+    verify_filters,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -25,8 +31,42 @@ except ImportError:
 _INDEX_UNSAFE_RE = re.compile(r"[^a-z0-9_-]")
 
 
+def _index_properties(dimension: int) -> dict[str, dict[str, Any]]:
+    """The mapping properties an index is expected to carry.
+
+    Declared in one place so ``initialize()`` can both create an index with
+    them and check an existing index against them. Adding a property here is
+    what makes older indices get it on their next ``start()``.
+    """
+    return {
+        "vector": {
+            "type": "dense_vector",
+            "dims": dimension,
+            "index": True,
+            "similarity": "cosine",
+        },
+        "original_question": {"type": "text"},
+        "normalized_question": {"type": "keyword"},
+        "generated_query": {"type": "text"},
+        "query_hash": {"type": "keyword"},
+        "response_summary": {"type": "text"},
+        "template_id": {"type": "keyword"},
+        "usage_count": {"type": "integer"},
+        "feedback_correct": {"type": "integer"},
+        "feedback_incorrect": {"type": "integer"},
+        "created_at": {"type": "date"},
+        "expires_at": {"type": "date"},
+        # 'flattened' indexes every sub-key as a keyword without adding a
+        # mapping field per key — the whole point here, since metadata keys are
+        # chosen by the caller and would otherwise explode the mapping.
+        "metadata": {"type": "flattened"},
+    }
+
+
 class ElasticsearchBackend(VectorStorageBackend):
     """Elasticsearch 8.x backend. Requires elasticsearch[async]>=8.12."""
+
+    supports_metadata = True
 
     def __init__(self, settings: Any = None) -> None:
         if not HAS_ELASTICSEARCH:
@@ -76,29 +116,10 @@ class ElasticsearchBackend(VectorStorageBackend):
         try:
             exists = await self._client.indices.exists(index=index)
             if exists:
+                await self._reconcile_mapping(index, dimension)
                 return
             mapping = {
-                "mappings": {
-                    "properties": {
-                        "vector": {
-                            "type": "dense_vector",
-                            "dims": dimension,
-                            "index": True,
-                            "similarity": "cosine",
-                        },
-                        "original_question": {"type": "text"},
-                        "normalized_question": {"type": "keyword"},
-                        "generated_query": {"type": "text"},
-                        "query_hash": {"type": "keyword"},
-                        "response_summary": {"type": "text"},
-                        "template_id": {"type": "keyword"},
-                        "usage_count": {"type": "integer"},
-                        "feedback_correct": {"type": "integer"},
-                        "feedback_incorrect": {"type": "integer"},
-                        "created_at": {"type": "date"},
-                        "expires_at": {"type": "date"},
-                    }
-                },
+                "mappings": {"properties": _index_properties(dimension)},
                 "settings": {
                     "number_of_shards": 1,
                     "number_of_replicas": 0,
@@ -106,10 +127,86 @@ class ElasticsearchBackend(VectorStorageBackend):
             }
             await self._client.indices.create(index=index, body=mapping)
             logger.info("Created Elasticsearch index '%s'", index)
+        except StorageInitializationError:
+            raise
         except Exception as e:
             raise StorageInitializationError(
                 f"Failed to initialize Elasticsearch index '{index}': {e}"
             ) from e
+
+    async def _reconcile_mapping(self, index: str, dimension: int) -> None:
+        """Add mapping properties an index created by an older version lacks.
+
+        ``initialize()`` returned as soon as the index existed, so a mapping
+        written by an earlier version was never revisited and every property
+        added since was missing. Elasticsearch's dynamic mapping papered over
+        that for simple types — inferring ``long`` for the feedback counters,
+        say — which is worse than failing: the index quietly disagrees with the
+        declared mapping, and a property whose type cannot be inferred (a date
+        that first appears as a string, a keyword that must not be analysed)
+        lands wrong and stays wrong.
+
+        Adding properties to a live mapping is supported; changing existing
+        ones is not, and this never tries to.
+        """
+        expected = _index_properties(dimension)
+        try:
+            resp = await self._client.indices.get_mapping(index=index)
+        except Exception as e:
+            raise StorageInitializationError(
+                f"Could not read the mapping of Elasticsearch index '{index}': {e}"
+            ) from e
+
+        # The response is keyed by concrete index name, which differs from the
+        # requested name when it was reached through an alias.
+        body = resp.get(index) if hasattr(resp, "get") else None
+        if body is None:
+            body = next(iter(resp.values()), {}) if hasattr(resp, "values") else {}
+        existing = (body.get("mappings") or {}).get("properties") or {}
+
+        missing = {name: spec for name, spec in expected.items() if name not in existing}
+        if not missing:
+            return
+
+        try:
+            await self._client.indices.put_mapping(
+                index=index, body={"properties": missing}
+            )
+        except Exception as e:
+            raise StorageInitializationError(
+                f"Elasticsearch index '{index}' was created by an older version of "
+                f"medha and is missing the mapping properties {sorted(missing)}. "
+                f"Adding them failed ({e}). Add them with a mapping update, or "
+                f"reindex, before using this collection."
+            ) from e
+
+        logger.info(
+            "Added mapping properties %s to Elasticsearch index '%s', "
+            "created by an older version",
+            sorted(missing),
+            index,
+        )
+
+    @staticmethod
+    def _knn_filter(pushable: MetadataDict) -> dict[str, Any]:
+        """The knn filter: not expired, plus one term per pushed-down key.
+
+        ``metadata`` is a ``flattened`` field, so every sub-key is indexed as a
+        keyword and ``metadata.<key>`` is directly termable without the mapping
+        having to know the key in advance.
+        """
+        ttl_filter: dict[str, Any] = {
+            "bool": {
+                "should": [
+                    {"bool": {"must_not": {"exists": {"field": "expires_at"}}}},
+                    {"range": {"expires_at": {"gt": "now"}}},
+                ]
+            }
+        }
+        if not pushable:
+            return ttl_filter
+        terms = [{"term": {f"metadata.{key}": value}} for key, value in pushable.items()]
+        return {"bool": {"filter": [ttl_filter, *terms]}}
 
     async def search(
         self,
@@ -118,26 +215,44 @@ class ElasticsearchBackend(VectorStorageBackend):
         limit: int = 5,
         score_threshold: float = 0.0,
     ) -> list[CacheResult]:
+        return await self.search_filtered(
+            collection_name, vector, limit, score_threshold, filters=None
+        )
+
+    async def search_filtered(
+        self,
+        collection_name: str,
+        vector: list[float],
+        limit: int = 5,
+        score_threshold: float = 0.0,
+        filters: MetadataDict | None = None,
+        overfetch: int = 10,
+    ) -> list[CacheResult]:
+        """Search with the string constraints pushed into the knn filter.
+
+        Only strings go down. A ``flattened`` field indexes every leaf value as
+        a keyword — ``10`` is stored as ``"10"``, ``true`` as ``"true"`` — so a
+        term carrying a number or a boolean depends on how the client and the
+        engine happen to stringify it. Strings have no such ambiguity;
+        everything else is checked in Python.
+
+        Raises:
+            StorageError: If the search fails.
+        """
         if self._client is None:
             raise StorageError("Not connected. Call connect() first.")
         index = self._index_name(collection_name)
-        ttl_filter = {
-            "bool": {
-                "should": [
-                    {"bool": {"must_not": {"exists": {"field": "expires_at"}}}},
-                    {"range": {"expires_at": {"gt": "now"}}},
-                ]
-            }
-        }
+        pushable, residual = split_filters(filters)
+        fetch = filter_fetch_size(limit, residual, overfetch)
         query = {
             "knn": {
                 "field": "vector",
                 "query_vector": vector,
-                "k": limit,
-                "num_candidates": self._settings.es_num_candidates,
-                "filter": ttl_filter,
+                "k": fetch,
+                "num_candidates": max(self._settings.es_num_candidates, fetch),
+                "filter": self._knn_filter(pushable),
             },
-            "size": limit,
+            "size": fetch,
             "_source": {
                 "excludes": ["vector"]
             },
@@ -156,7 +271,7 @@ class ElasticsearchBackend(VectorStorageBackend):
                 continue
             src = hit["_source"]
             results.append(_hit_to_cache_result(hit["_id"], src, score))
-        return results
+        return verify_filters(results, filters, limit)
 
     async def upsert(self, collection_name: str, entries: list[CacheEntry]) -> None:
         if self._client is None:
@@ -179,6 +294,7 @@ class ElasticsearchBackend(VectorStorageBackend):
                     "feedback_incorrect": entry.feedback_incorrect,
                     "created_at": _dt_to_str(entry.created_at),
                     "vector": entry.vector,
+                    "metadata": dict(entry.metadata),
                 }
                 if entry.expires_at is not None:
                     doc["expires_at"] = _dt_to_str(entry.expires_at)
@@ -509,4 +625,5 @@ def _hit_to_cache_result(doc_id: str, src: dict[str, Any], score: float) -> Cach
         feedback_incorrect=src.get("feedback_incorrect", 0),
         created_at=_parse_dt(src.get("created_at")),
         expires_at=_parse_dt(src.get("expires_at")),
+        metadata=loads_metadata(src.get("metadata")),
     )

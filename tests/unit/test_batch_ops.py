@@ -276,6 +276,26 @@ async def test_export_to_dataframe_without_pandas_raises():
 # ---------------------------------------------------------------------------
 
 
+def test_dedup_key_is_the_query_hash():
+    """Pins the seam that decides which entries count as duplicates.
+
+    ``dedup_collection`` groups on ``_dedup_key`` rather than reading
+    ``query_hash`` inline, so widening the identity later is a one-function
+    change. This test exists so that widening is a deliberate edit here and
+    not a silent behaviour change: two entries that share a query but differ
+    in some other dimension are collapsed today.
+    """
+    from medha.core import _dedup_key
+
+    a = _make_result(id="a", query="SELECT 1")
+    b = _make_result(id="b", query="SELECT 1")
+    c = _make_result(id="c", query="SELECT 2")
+
+    assert _dedup_key(a) == a.query_hash
+    assert _dedup_key(a) == _dedup_key(b)
+    assert _dedup_key(a) != _dedup_key(c)
+
+
 @pytest.mark.asyncio
 async def test_dedup_keep_latest_removes_older_duplicate():
     older = _make_result(id="old", query="SELECT 1", created_at=datetime(2024, 1, 1, tzinfo=timezone.utc))

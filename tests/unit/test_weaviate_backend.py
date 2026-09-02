@@ -668,3 +668,85 @@ async def test_stats_methods_require_connection():
 
     with pytest.raises(StorageError, match="connect()"):
         await b.save_stats(COLL, PersistedStats())
+
+
+# ---------------------------------------------------------------------------
+# initialize — property reconciliation (S0.2)
+# ---------------------------------------------------------------------------
+
+
+def _wv_config(property_names):
+    """A collection config carrying exactly *property_names*.
+
+    SimpleNamespace rather than MagicMock: ``MagicMock(name=...)`` names the
+    mock itself instead of setting a ``.name`` attribute, which is exactly the
+    attribute being asserted on here.
+    """
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        inverted_index_config=SimpleNamespace(index_null_state=True),
+        properties=[SimpleNamespace(name=n) for n in property_names],
+    )
+
+
+def _declared_property_names():
+    from medha.backends.weaviate import _collection_properties
+
+    return [p.name for p in _collection_properties()]
+
+
+async def test_initialize_adds_properties_missing_from_an_older_collection(wv_backend):
+    """A collection created before a property existed must receive it.
+
+    ``initialize()`` handed the existing collection straight back without ever
+    comparing its properties, so anything added to the schema later never
+    reached collections already in place.
+    """
+    b, col, client = wv_backend
+    client.collections.exists.return_value = True
+    without_counters = [
+        n for n in _declared_property_names() if not n.startswith("feedback_")
+    ]
+    col.config = AsyncMock()
+    col.config.get = AsyncMock(return_value=_wv_config(without_counters))
+    col.config.add_property = AsyncMock()
+
+    await b.initialize(COLL, DIM)
+
+    client.collections.create.assert_not_awaited()
+    client.collections.delete.assert_not_awaited()  # never repair by wiping the cache
+    added = [call.args[0].name for call in col.config.add_property.await_args_list]
+    assert added == ["feedback_correct", "feedback_incorrect"]
+
+
+async def test_initialize_adds_nothing_when_the_collection_is_current(wv_backend):
+    b, col, client = wv_backend
+    client.collections.exists.return_value = True
+    col.config = AsyncMock()
+    col.config.get = AsyncMock(return_value=_wv_config(_declared_property_names()))
+    col.config.add_property = AsyncMock()
+
+    await b.initialize(COLL, DIM)
+
+    col.config.add_property.assert_not_awaited()
+
+
+async def test_initialize_names_the_properties_it_could_not_add(wv_backend):
+    """The floor: fail here with the cause, not silently drop writes later."""
+    from medha.exceptions import StorageInitializationError
+
+    b, col, client = wv_backend
+    client.collections.exists.return_value = True
+    col.config = AsyncMock()
+    col.config.get = AsyncMock(
+        return_value=_wv_config(
+            [n for n in _declared_property_names() if n != "expires_at"]
+        )
+    )
+    col.config.add_property = AsyncMock(side_effect=RuntimeError("schema is locked"))
+
+    with pytest.raises(StorageInitializationError) as excinfo:
+        await b.initialize(COLL, DIM)
+
+    assert "expires_at" in str(excinfo.value)

@@ -49,6 +49,16 @@ class InMemoryL1Cache(L1CacheBackend):
         async with self._lock:
             self._cache.pop(key, None)
 
+    async def invalidate_prefix(self, prefix: str) -> None:
+        """Drop every key starting with *prefix* instead of flushing the cache.
+
+        A linear scan: the cache is an ``OrderedDict`` bounded by ``max_size``,
+        so there is nothing cheaper to scan and nothing to index.
+        """
+        async with self._lock:
+            for key in [k for k in self._cache if k.startswith(prefix)]:
+                del self._cache[key]
+
     @property
     def size(self) -> int:
         return len(self._cache)

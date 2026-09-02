@@ -9,6 +9,7 @@ from typing import Any
 from medha.exceptions import StorageError
 from medha.interfaces.storage import VectorStorageBackend
 from medha.types import CacheEntry, CacheResult, PersistedStats
+from medha.utils.metadata import loads_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,8 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
 
 class InMemoryBackend(VectorStorageBackend):
     """Pure-Python in-process vector backend. No external dependencies required."""
+
+    supports_metadata = True
 
     def __init__(self) -> None:
         # _store: collection_name -> {"dimension": int, "entries": {id: stored_point}}
@@ -110,6 +113,10 @@ class InMemoryBackend(VectorStorageBackend):
                         "expires_at": entry.expires_at.isoformat() if entry.expires_at else None,
                         "feedback_correct": entry.feedback_correct,
                         "feedback_incorrect": entry.feedback_incorrect,
+                        # Copied, not aliased: the caller keeps a reference to
+                        # the CacheEntry, and a stored point must not change
+                        # under the collection when that dict is mutated.
+                        "metadata": dict(entry.metadata),
                     },
                 }
 
@@ -282,4 +289,5 @@ def _point_to_cache_result(point: dict[str, Any], score: float) -> CacheResult:
         expires_at=_parse_dt(payload["expires_at"]) if payload.get("expires_at") else None,
         feedback_correct=payload.get("feedback_correct", 0),
         feedback_incorrect=payload.get("feedback_incorrect", 0),
+        metadata=loads_metadata(payload.get("metadata")),
     )

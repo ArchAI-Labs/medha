@@ -9,6 +9,7 @@ from typing import Any
 from medha.exceptions import ConfigurationError, StorageError, StorageInitializationError
 from medha.interfaces.storage import VectorStorageBackend
 from medha.types import CacheEntry, CacheResult, PersistedStats
+from medha.utils.metadata import dumps_metadata, loads_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -25,11 +26,30 @@ try:
         TextField,
         VectorField,
     )
-    from redis.commands.search.indexDefinition import IndexDefinition, IndexType
     from redis.commands.search.query import Query
+
+    try:
+        # redis-py exposes this module under its snake_case name from 5.0.1 and
+        # dropped the camelCase spelling in 6.0. Accepting either keeps the
+        # backend working across the whole range instead of silently
+        # disappearing on a driver that is merely newer than expected.
+        from redis.commands.search.index_definition import IndexDefinition, IndexType
+    except ImportError:
+        # mypy analyses both branches, so the fallback always reads as a
+        # redefinition of the names bound above.
+        from redis.commands.search.indexDefinition import (  # type: ignore[no-redef]
+            IndexDefinition,
+            IndexType,
+        )
+
     HAS_REDIS = True
-except ImportError:
+    _REDIS_IMPORT_ERROR: str | None = None
+except ImportError as exc:
+    # Keep the reason. Reporting "install the package" to someone who already
+    # has it installed — the failure mode this replaced — sends them to fix
+    # the one thing that is not wrong.
     HAS_REDIS = False
+    _REDIS_IMPORT_ERROR = f"{type(exc).__name__}: {exc}"
 
 _TAG_ESCAPE_RE = re.compile(r'([,.<>{}\[\]"\':;!@#$%^&*()\-+=~|/\\])')
 _SAFE_NAME_RE = re.compile(r"[^a-zA-Z0-9_\-]")
@@ -98,16 +118,20 @@ def _doc_to_result(doc: Any, score: float) -> CacheResult:
         feedback_incorrect=int(_get("feedback_incorrect", 0) or 0),
         created_at=created_at,
         expires_at=expires_at,
+        metadata=loads_metadata(_get("metadata_json", "")),
     )
 
 
 class RedisVectorBackend(VectorStorageBackend):
     """Redis Stack (RediSearch) vector backend. Supports standalone and sentinel modes."""
 
+    supports_metadata = True
+
     def __init__(self, settings: Any = None) -> None:
         if not HAS_REDIS:
             raise ConfigurationError(
-                "redis backend requires 'redis[hiredis]>=4.6'. "
+                "redis backend requires 'redis[hiredis]>=4.6' and numpy. "
+                f"Import failed with — {_REDIS_IMPORT_ERROR}. "
                 "Install with: pip install medha-archai[redis]"
             )
         from medha.config import Settings
@@ -242,7 +266,7 @@ class RedisVectorBackend(VectorStorageBackend):
                     "original_question", "normalized_question", "generated_query",
                     "query_hash", "response_summary", "template_id",
                     "usage_count", "feedback_correct", "feedback_incorrect",
-                    "created_at", "expires_at", "__score",
+                    "created_at", "expires_at", "metadata_json", "__score",
                 )
                 .paging(0, limit)
                 .dialect(2)
@@ -298,6 +322,11 @@ class RedisVectorBackend(VectorStorageBackend):
                     "feedback_incorrect": entry.feedback_incorrect,
                     "created_at": created_at,
                     "expires_at": expires_at,
+                    # Stored but not indexed: RediSearch needs one declared
+                    # field per filterable key, and the keys are the caller's
+                    # to invent. FT.SEARCH still loads it for RETURN, which is
+                    # all the base class post-filter needs.
+                    "metadata_json": dumps_metadata(entry.metadata),
                     "vector": vec_bytes,
                 }
                 pipe.hset(f"{col_key}:{entry.id}", mapping=mapping)
@@ -320,7 +349,7 @@ class RedisVectorBackend(VectorStorageBackend):
             "original_question", "normalized_question", "generated_query",
             "query_hash", "response_summary", "template_id",
             "usage_count", "feedback_correct", "feedback_incorrect",
-            "created_at", "expires_at",
+            "created_at", "expires_at", "metadata_json",
         ]
         if with_vectors:
             return_fields.append("vector")
@@ -378,7 +407,7 @@ class RedisVectorBackend(VectorStorageBackend):
                     "original_question", "normalized_question", "generated_query",
                     "query_hash", "response_summary", "template_id",
                     "usage_count", "feedback_correct", "feedback_incorrect",
-                    "created_at", "expires_at",
+                    "created_at", "expires_at", "metadata_json",
                 )
                 .paging(0, 1)
                 .dialect(2)
@@ -453,7 +482,7 @@ class RedisVectorBackend(VectorStorageBackend):
                     "original_question", "normalized_question", "generated_query",
                     "query_hash", "response_summary", "template_id",
                     "usage_count", "feedback_correct", "feedback_incorrect",
-                    "created_at", "expires_at",
+                    "created_at", "expires_at", "metadata_json",
                 )
                 .paging(0, 1)
                 .dialect(2)

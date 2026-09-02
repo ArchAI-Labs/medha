@@ -10,7 +10,14 @@ from typing import Any
 
 from medha.exceptions import ConfigurationError, StorageError, StorageInitializationError
 from medha.interfaces.storage import VectorStorageBackend
-from medha.types import CacheEntry, CacheResult, PersistedStats
+from medha.types import CacheEntry, CacheResult, MetadataDict, PersistedStats
+from medha.utils.metadata import (
+    dumps_metadata,
+    filter_fetch_size,
+    loads_metadata,
+    split_filters,
+    verify_filters,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,8 +52,18 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# Prefix under which each metadata key is mirrored as its own Chroma metadata
+# entry. Chroma's metadata is schemaless and its `where` clause matches one key
+# at a time, so a key it can see is a key it can filter on — which the JSON
+# blob below, opaque to Chroma, could never be. The blob stays the source of
+# truth on read: it is what preserves the int/float/bool distinction.
+_MD_PREFIX = "md."
+
+
 def _entry_to_metadata(entry: CacheEntry) -> dict[str, Any]:
+    mirrored = {f"{_MD_PREFIX}{key}": value for key, value in entry.metadata.items()}
     return {
+        **mirrored,
         "original_question": entry.original_question,
         "normalized_question": entry.normalized_question,
         "generated_query": entry.generated_query,
@@ -58,6 +75,9 @@ def _entry_to_metadata(entry: CacheEntry) -> dict[str, Any]:
         "feedback_incorrect": entry.feedback_incorrect,
         "created_at": entry.created_at.isoformat() if entry.created_at else "",
         "expires_at": entry.expires_at.isoformat() if entry.expires_at else "",
+        # Chroma metadata values must be scalars, so the entry's own metadata
+        # travels as one JSON string rather than as separate keys.
+        "metadata_json": dumps_metadata(entry.metadata),
     }
 
 
@@ -84,6 +104,7 @@ def _meta_to_result(id_: str, score: float, meta: dict[str, Any]) -> CacheResult
         feedback_incorrect=int(meta.get("feedback_incorrect") or 0),
         created_at=created_at,
         expires_at=expires_at,
+        metadata=loads_metadata(meta.get("metadata_json")),
     )
 
 
@@ -93,6 +114,8 @@ class ChromaBackend(VectorStorageBackend):
     Only 'http' uses the native async client; the other two wrap sync calls with
     asyncio.to_thread.
     """
+
+    supports_metadata = True
 
     def __init__(self, settings: Any = None) -> None:
         if not HAS_CHROMA:
@@ -164,6 +187,20 @@ class ChromaBackend(VectorStorageBackend):
             )
         return col
 
+    @staticmethod
+    def _build_where(pushable: MetadataDict) -> dict[str, Any]:
+        """The ``where`` clause: never expired, and matching *pushable*."""
+        ttl: dict[str, Any] = {
+            "$or": [{"expires_at": {"$eq": ""}}, {"expires_at": {"$gt": _now_iso()}}]
+        }
+        if not pushable:
+            return ttl
+        conditions: list[dict[str, Any]] = [ttl]
+        conditions += [
+            {f"{_MD_PREFIX}{key}": {"$eq": value}} for key, value in pushable.items()
+        ]
+        return {"$and": conditions}
+
     async def search(
         self,
         collection_name: str,
@@ -171,18 +208,44 @@ class ChromaBackend(VectorStorageBackend):
         limit: int = 5,
         score_threshold: float = 0.0,
     ) -> list[CacheResult]:
+        return await self.search_filtered(
+            collection_name, vector, limit, score_threshold, filters=None
+        )
+
+    async def search_filtered(
+        self,
+        collection_name: str,
+        vector: list[float],
+        limit: int = 5,
+        score_threshold: float = 0.0,
+        filters: MetadataDict | None = None,
+        overfetch: int = 10,
+    ) -> list[CacheResult]:
+        """Search with the string constraints folded into Chroma's ``where``.
+
+        Chroma evaluates the clause before it ranks, so a match that sits well
+        outside the unfiltered top-N is still returned — which is the whole
+        reason to push a filter down rather than apply it afterwards.
+
+        Numbers stay in the residual: ``metadata_matches`` treats ``10`` and
+        ``10.0`` as the same value and Chroma's ``$eq`` is not known to, and a
+        constraint that is stricter than intended silently loses matches.
+
+        Raises:
+            StorageError: If the search fails.
+        """
         collection = self._get_collection(collection_name)
         cnt = await self._run(collection.count)
         if cnt == 0:
             return []
-        now_iso = _now_iso()
-        where = {"$or": [{"expires_at": {"$eq": ""}}, {"expires_at": {"$gt": now_iso}}]}
+        pushable, residual = split_filters(filters, pushable=(str, bool))
+        fetch = filter_fetch_size(limit, residual, overfetch)
         try:
             result = await self._run(
                 collection.query,
                 query_embeddings=[vector],
-                n_results=min(limit, cnt),
-                where=where,
+                n_results=min(fetch, cnt),
+                where=self._build_where(pushable),
                 include=["metadatas", "distances"],
             )
         except Exception as e:
@@ -196,7 +259,7 @@ class ChromaBackend(VectorStorageBackend):
             score = 1.0 - dist
             if score >= score_threshold:
                 out.append(_meta_to_result(id_, score, meta))
-        return out
+        return verify_filters(out, filters, limit)
 
     async def upsert(self, collection_name: str, entries: list[CacheEntry]) -> None:
         if not entries:

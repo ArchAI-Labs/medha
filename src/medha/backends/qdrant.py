@@ -24,6 +24,7 @@ try:
         PointIdsList,
         PointStruct,
         QuantizationSearchParams,
+        Range,
         ScalarQuantization,
         ScalarQuantizationConfig,
         ScalarType,
@@ -43,7 +44,8 @@ except ImportError:
 from medha.config import Settings
 from medha.exceptions import ConfigurationError, StorageError, StorageInitializationError
 from medha.interfaces.storage import VectorStorageBackend
-from medha.types import CacheEntry, CacheResult, PersistedStats
+from medha.types import CacheEntry, CacheResult, MetadataDict, PersistedStats
+from medha.utils.metadata import loads_metadata, verify_filters
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +74,8 @@ class QdrantBackend(VectorStorageBackend):
     Args:
         settings: Medha Settings instance. If None, loads from environment.
     """
+
+    supports_metadata = True
 
     def __init__(self, settings: Settings | None = None):
         if not HAS_QDRANT:
@@ -185,6 +189,38 @@ class QdrantBackend(VectorStorageBackend):
                 f"Failed to initialize collection '{collection_name}': {e}"
             ) from e
 
+    @staticmethod
+    def _build_query_filter(filters: MetadataDict | None) -> Any:
+        """Filter excluding expired points, and points outside *filters*.
+
+        Metadata lives in a nested ``metadata`` payload object, so each
+        constraint is a condition on ``metadata.<key>``.
+
+        Numbers go through a degenerate range rather than ``MatchValue``.
+        ``match`` applies to keywords, integers and booleans — it matches
+        nothing at all for a float, and for an integer it would not see a
+        stored ``10.0`` as the ``10`` that was asked for, which is a match
+        everywhere else in medha. A range of ``[v, v]`` is numeric on both
+        sides and agrees with ``metadata_matches``.
+
+        No payload index is created for these keys — they are arbitrary and
+        only known at write time — so Qdrant resolves them by scanning the
+        candidates the vector search produced. Fine at cache scale; a
+        deployment leaning on one key can add its own index.
+        """
+        must: list[Any] = []
+        for key, value in (filters or {}).items():
+            field = f"metadata.{key}"
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                must.append(FieldCondition(key=field, range=Range(gte=value, lte=value)))
+            else:
+                must.append(FieldCondition(key=field, match=MatchValue(value=value)))
+        now_iso = datetime.now(timezone.utc).isoformat()
+        return Filter(
+            must=must or None,
+            must_not=[FieldCondition(key="expires_at", range=DatetimeRange(lte=now_iso))],
+        )
+
     async def search(
         self,
         collection_name: str,
@@ -206,33 +242,59 @@ class QdrantBackend(VectorStorageBackend):
         Raises:
             StorageError: If the search fails.
         """
+        return await self.search_filtered(
+            collection_name, vector, limit, score_threshold, filters=None
+        )
+
+    async def search_filtered(
+        self,
+        collection_name: str,
+        vector: list[float],
+        limit: int = 5,
+        score_threshold: float = 0.0,
+        filters: MetadataDict | None = None,
+        overfetch: int = 10,
+    ) -> list[CacheResult]:
+        """Search with the metadata filter pushed into the Qdrant query.
+
+        Overrides the base class post-filter, which would over-fetch and drop
+        rows in Python. Pushing the condition down means ``limit`` results are
+        ``limit`` *matching* results — the base class can only return what the
+        unfiltered top-N happened to contain — so ``overfetch`` is unused here.
+
+        Every scalar type goes down, unlike the backends that push strings
+        only: Qdrant's conditions are known to agree with ``metadata_matches``
+        on all of them, and there are tests against a real instance that say
+        so. The results are still verified in Python, which costs one dict
+        comparison per row and removes the class of bug where a filter is
+        pushed down and quietly means something else.
+
+        Raises:
+            StorageError: If the search fails.
+        """
         try:
             logger.debug(
-                "Searching '%s': limit=%d, threshold=%.3f",
+                "Searching '%s': limit=%d, threshold=%.3f, filters=%s",
                 collection_name,
                 limit,
                 score_threshold,
+                sorted(filters) if filters else "none",
             )
             search_params = self._build_search_params()
-            now_iso = datetime.now(timezone.utc).isoformat()
-            ttl_filter = Filter(
-                must_not=[
-                    FieldCondition(
-                        key="expires_at",
-                        range=DatetimeRange(lte=now_iso),
-                    )
-                ]
-            )
             response = await self.client.query_points(
                 collection_name=collection_name,
                 query=vector,
                 limit=limit,
                 score_threshold=score_threshold if score_threshold > 0.0 else None,
                 search_params=search_params,
-                query_filter=ttl_filter,
+                query_filter=self._build_query_filter(filters),
                 with_payload=True,
             )
-            results = [self._point_to_cache_result(point) for point in response.points]
+            results = verify_filters(
+                [self._point_to_cache_result(point) for point in response.points],
+                filters,
+                limit,
+            )
             if results:
                 logger.debug(
                     "Search '%s' returned %d results (top score=%.4f)",
@@ -311,25 +373,11 @@ class QdrantBackend(VectorStorageBackend):
                 with_payload=True,
             )
 
-            results = []
-            for record in records:
-                payload = record.payload or {}
-                results.append(
-                    CacheResult(
-                        id=str(record.id),
-                        score=0.0,
-                        original_question=payload.get("original_question", ""),
-                        normalized_question=payload.get("normalized_question", ""),
-                        generated_query=payload.get("generated_query", ""),
-                        query_hash=payload.get("query_hash", ""),
-                        response_summary=payload.get("response_summary"),
-                        template_id=payload.get("template_id"),
-                        usage_count=payload.get("usage_count", 0),
-                        feedback_correct=payload.get("feedback_correct", 0),
-                        feedback_incorrect=payload.get("feedback_incorrect", 0),
-                        created_at=payload.get("created_at"),
-                    )
-                )
+            # Shared with search() rather than rebuilt here. The copy this
+            # replaced had drifted: it never carried expires_at, and it would
+            # have missed metadata the same way — silently, since a dropped
+            # field reads as "this entry has no scope" rather than as an error.
+            results = [self._point_to_cache_result(record) for record in records]
 
             next_offset_str = str(next_offset) if next_offset is not None else None
             logger.debug(
@@ -854,10 +902,15 @@ class QdrantBackend(VectorStorageBackend):
 
     @staticmethod
     def _point_to_cache_result(point: Any) -> CacheResult:
-        """Convert a Qdrant ScoredPoint to a CacheResult."""
+        """Convert a Qdrant ScoredPoint — or a scroll Record — to a CacheResult.
+
+        A Record carries no score at all, which is why the attribute is read
+        defensively: scrolling is not a ranking, and 0.0 is what this backend
+        has always reported for it.
+        """
         payload = point.payload or {}
-        score = point.score if point.score is not None else 0.0
-        score = max(0.0, min(1.0, score))
+        raw_score = getattr(point, "score", None)
+        score = max(0.0, min(1.0, raw_score if raw_score is not None else 0.0))
 
         expires_at: datetime | None = None
         if raw_ea := payload.get("expires_at"):
@@ -880,6 +933,7 @@ class QdrantBackend(VectorStorageBackend):
             feedback_incorrect=payload.get("feedback_incorrect", 0),
             created_at=payload.get("created_at"),
             expires_at=expires_at,
+            metadata=loads_metadata(payload.get("metadata")),
         )
 
     @staticmethod
@@ -900,5 +954,9 @@ class QdrantBackend(VectorStorageBackend):
                 "feedback_incorrect": entry.feedback_incorrect,
                 "created_at": entry.created_at.isoformat(),
                 "expires_at": entry.expires_at.isoformat() if entry.expires_at else None,
+                # A nested object rather than a JSON string: Qdrant indexes and
+                # filters payload sub-keys directly, which is what lets
+                # search_filtered push the constraint down to the server.
+                "metadata": dict(entry.metadata),
             },
         )

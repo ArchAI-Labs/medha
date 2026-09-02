@@ -12,7 +12,7 @@ Invalidation permanently removes entries from the cache. Use it when the underly
 
 | Method | Scope | Returns |
 |---|---|---|
-| `invalidate(question)` | One entry, matched by normalized question | `bool` — whether an entry was deleted |
+| `invalidate(question)` | Every entry matched by normalized question | `bool` — whether anything was deleted |
 | `invalidate_by_query_hash(query_hash)` | Every entry producing the same query | `int` — entries deleted |
 | `invalidate_by_template(template_id)` | Every entry stored under a template | `int` — entries deleted |
 | `invalidate_collection(name=None)` | The whole collection | `int` — entries dropped |
@@ -30,7 +30,14 @@ async with Medha("demo", embedder=embedder, settings=settings) as cache:
 
 This performs an exact normalized-text match, not a semantic search. The question must match verbatim (modulo normalization) the question used at store time. Returns `False` if no entry matched.
 
-The matching L1 key is removed alongside the backend entry.
+The matching L1 key is removed alongside the backend entries.
+
+!!! note "A question can map to more than one entry"
+    `store()` mints a new id on every call, so storing the same question twice
+    leaves two entries behind. `invalidate()` removes **all** of them: deleting
+    one and stopping would leave the rest answering a question you have just
+    invalidated. The return value stays a `bool` — use
+    `invalidate_by_query_hash()` when you need the count.
 
 ---
 
