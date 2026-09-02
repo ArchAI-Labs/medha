@@ -11,6 +11,7 @@ from medha.backends._escape import quote_sql_literal
 from medha.exceptions import ConfigurationError, StorageError, StorageInitializationError
 from medha.interfaces.storage import VectorStorageBackend
 from medha.types import CacheEntry, CacheResult, PersistedStats
+from medha.utils.metadata import dumps_metadata, loads_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +39,7 @@ _SCALAR_FIELDS = [
     "id", "original_question", "normalized_question", "generated_query",
     "query_hash", "response_summary", "template_id", "usage_count",
     "feedback_correct", "feedback_incorrect",
-    "created_at", "expires_at",
+    "created_at", "expires_at", "metadata_json",
 ]
 
 
@@ -99,6 +100,7 @@ def _doc_to_result(doc: dict[str, Any], score: float) -> CacheResult:
         feedback_incorrect=doc.get("feedback_incorrect") or 0,
         created_at=_parse_dt(doc.get("created_at")),
         expires_at=_parse_dt(doc.get("expires_at")),
+        metadata=loads_metadata(doc.get("metadata_json")),
     )
 
 
@@ -116,6 +118,7 @@ def _entry_to_doc(entry: CacheEntry) -> dict[str, Any]:
         "feedback_incorrect": entry.feedback_incorrect,
         "created_at": _dt_to_iso(entry.created_at),
         "vector": entry.vector,
+        "metadata_json": dumps_metadata(entry.metadata),
     }
     if entry.expires_at is not None:
         doc["expires_at"] = _dt_to_iso(entry.expires_at)
@@ -146,6 +149,11 @@ def _index_fields(dimension: int) -> list[Any]:
         SimpleField(name="feedback_incorrect", type=SearchFieldDataType.Int32, filterable=True),
         SimpleField(name="created_at", type=SearchFieldDataType.DateTimeOffset, filterable=True, sortable=True),
         SimpleField(name="expires_at", type=SearchFieldDataType.DateTimeOffset, filterable=True, nullable=True),
+        # Not filterable: OData cannot look inside a JSON string, so the
+        # metadata filter runs as the base class post-filter. Filtering it
+        # natively would mean a field per key, which the index cannot declare
+        # ahead of the keys a caller invents.
+        SimpleField(name="metadata_json", type=SearchFieldDataType.String, nullable=True),
         SearchField(
             name="vector",
             type=SearchFieldDataType.Collection(SearchFieldDataType.Single),
@@ -158,6 +166,8 @@ def _index_fields(dimension: int) -> list[Any]:
 
 class AzureSearchBackend(VectorStorageBackend):
     """Azure AI Search backend. Requires azure-search-documents>=11.4,<12."""
+
+    supports_metadata = True
 
     def __init__(self, settings: Any = None) -> None:
         if not HAS_AZURE_SEARCH:

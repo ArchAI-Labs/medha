@@ -25,10 +25,17 @@ from medha.types import (
     CacheHit,
     CacheResult,
     CacheStats,
+    MetadataDict,
     PersistedStats,
     QueryTemplate,
     SearchStrategy,
     StrategyStats,
+)
+from medha.utils.metadata import (
+    canonical_json,
+    metadata_fingerprint,
+    metadata_matches,
+    validate_metadata,
 )
 from medha.utils.nlp import ParameterExtractor, keyword_overlap_score
 from medha.utils.normalization import normalize_question, query_hash, question_hash
@@ -55,16 +62,17 @@ _INVALIDATE_MAX_ENTRIES = 1000
 def _dedup_key(result: CacheResult) -> str:
     """Identity under which :meth:`Medha.dedup_collection` groups duplicates.
 
-    Two entries collapse into one when this key matches. Today that is the
-    query hash alone: entries that produce the same query text are the same
-    entry as far as the cache is concerned.
+    Two entries collapse into one when this key matches: the query text they
+    produce, plus the scope they are valid for. The same SQL stored under two
+    tenants, or for two dates, is two entries — deduplicating on the query
+    alone would delete one of them and leave the survivor answering for a
+    scope it was never stored under.
 
-    It lives in its own function because the identity is about to grow. Once
-    entries carry metadata, two rows with identical query text but different
-    metadata — the same SQL under two tenants, say — are distinct entries and
-    must not be collapsed into one.
+    Entries without metadata key on the query hash alone, exactly as before.
     """
-    return result.query_hash
+    if not result.metadata:
+        return result.query_hash
+    return f"{result.query_hash}|{canonical_json(result.metadata)}"
 
 
 class _StatsCollector:
@@ -438,7 +446,63 @@ class Medha:
 
     # --- Waterfall Search ---
 
-    async def search(self, question: str) -> CacheHit:
+    def _require_metadata_support(self, consequence: str) -> None:
+        """Refuse metadata work the configured backend cannot actually do.
+
+        A backend that does not round-trip metadata returns every entry with
+        an empty map. A filtered search against it would match nothing and
+        quietly answer NO_MATCH — a guardrail that looks like it is working
+        while in fact disabling the cache — and metadata handed to ``store()``
+        would vanish on the way in. Both are worse than an exception.
+
+        Raises:
+            ConfigurationError: If the backend does not support metadata.
+        """
+        if not getattr(self._backend, "supports_metadata", False):
+            raise ConfigurationError(
+                f"{type(self._backend).__name__} does not store entry metadata, "
+                f"so {consequence}. Use a backend that supports metadata, or "
+                f"drop the argument."
+            )
+
+    def _prepare_filters(self, filters: MetadataDict | None) -> MetadataDict:
+        """Validate *filters* and confirm the backend can honour them.
+
+        Returns:
+            The validated filters, or an empty dict when none were given.
+
+        Raises:
+            ValueError: If a key or value is not storable.
+            ConfigurationError: If the backend does not support metadata.
+        """
+        if not filters:
+            return {}
+        validated = validate_metadata(filters, label="filters")
+        self._require_metadata_support("it cannot serve a filtered search")
+        return validated
+
+    def _prepare_metadata(self, metadata: Any) -> MetadataDict:
+        """Validate metadata on its way into an entry.
+
+        Returns:
+            The validated metadata, or an empty dict when none was given.
+
+        Raises:
+            ValueError: If a key or value is not storable.
+            ConfigurationError: If the backend does not support metadata.
+        """
+        if not metadata:
+            return {}
+        validated = validate_metadata(metadata)
+        self._require_metadata_support("the metadata would be dropped on write")
+        return validated
+
+    async def search(
+        self,
+        question: str,
+        *,
+        filters: MetadataDict | None = None,
+    ) -> CacheHit:
         """Search the cache using the waterfall strategy.
 
         Tiers (checked in order, first hit wins):
@@ -450,14 +514,31 @@ class Medha:
 
         Args:
             question: Natural language question from the user.
+            filters: Exact-match constraints on entry metadata, ANDed. An
+                entry is only eligible if its metadata carries every one of
+                these keys with the same value, which is what keeps two
+                questions differing only by date, tenant or time window from
+                answering for each other. Under the default
+                Settings.metadata_filter_mode='strict' a mismatch removes the
+                candidate, so a scope with nothing cached returns NO_MATCH and
+                the caller falls back to generating the query.
+
+                Tier 1 is unaffected: a template renders a fresh query from
+                the question text rather than returning a stored entry, so it
+                cannot answer with another scope's query.
 
         Returns:
             CacheHit with the matched query, confidence, and strategy.
             Returns CacheHit(strategy=NO_MATCH) if no tier matches.
+
+        Raises:
+            ValueError: If a filter key or value is not storable.
+            ConfigurationError: If the backend does not store metadata.
         """
+        resolved_filters = self._prepare_filters(filters)
         self._request_count += 1
         t0 = time.monotonic()
-        result = await self._search_impl(question)
+        result = await self._search_impl(question, resolved_filters)
         latency_ms = (time.monotonic() - t0) * 1000
         await self._stats.record(result.strategy, latency_ms)
 
@@ -476,14 +557,42 @@ class Medha:
         self,
         questions: list[str],
         collection_name: str | None = None,
+        *,
+        filters: MetadataDict | list[MetadataDict | None] | None = None,
     ) -> list[CacheHit]:
         """Search for multiple questions, embedding them in a single batch call.
 
         Returns results in the same order as the input questions.
         Each result follows the same waterfall search strategy as search().
+
+        Args:
+            questions: Questions to look up.
+            collection_name: Target collection. None = main collection.
+            filters: Either one mapping applied to every question, or a list
+                with one entry per question (``None`` in a slot means that
+                question is searched unfiltered). The per-question form is the
+                usual one for a scoped batch: the whole point of batching
+                "revenue yesterday" with "revenue last Monday" is that each
+                resolves to a different date.
+
+        Raises:
+            ValueError: If a filter is not storable, or the list length does
+                not match the number of questions.
+            ConfigurationError: If the backend does not store metadata.
         """
         if not questions:
             return []
+        if isinstance(filters, list):
+            if len(filters) != len(questions):
+                raise ValueError(
+                    f"search_batch: filters has {len(filters)} entries but "
+                    f"{len(questions)} questions were given"
+                )
+            per_question = [self._prepare_filters(f) for f in filters]
+        else:
+            shared = self._prepare_filters(filters)
+            per_question = [shared] * len(questions)
+
         collection = collection_name or self._collection_name
         normalized = [normalize_question(q) for q in questions]
         try:
@@ -492,13 +601,15 @@ class Medha:
             logger.error("search_batch: embedding failed: %s", e)
             return [CacheHit(strategy=SearchStrategy.ERROR)] * len(questions)
         tasks = [
-            self._waterfall_search(q, v, collection)
-            for q, v in zip(questions, vectors, strict=False)
+            self._waterfall_search(q, v, collection, f)
+            for q, v, f in zip(questions, vectors, per_question, strict=False)
         ]
         results = await asyncio.gather(*tasks, return_exceptions=False)
         return list(results)
 
-    async def _search_impl(self, question: str) -> CacheHit:
+    async def _search_impl(
+        self, question: str, filters: MetadataDict | None = None
+    ) -> CacheHit:
         try:
             if not question or not question.strip():
                 logger.warning("Search called with empty question")
@@ -519,7 +630,9 @@ class Medha:
                 logger.error("Embedding failed, aborting search for: '%s'", question[:50])
                 return CacheHit(strategy=SearchStrategy.ERROR)
 
-            return await self._waterfall_search(question, embedding, self._collection_name)
+            return await self._waterfall_search(
+                question, embedding, self._collection_name, filters
+            )
 
         except Exception as e:
             logger.error("Search failed for '%s': %s", question[:50], e, exc_info=True)
@@ -530,10 +643,11 @@ class Medha:
         question: str,
         vector: list[float],
         collection_name: str,
+        filters: MetadataDict | None = None,
     ) -> CacheHit:
         try:
             # --- Tier 0: L1 Cache ---
-            l1_hit = await self._check_l1_cache(question)
+            l1_hit = await self._check_l1_cache(question, filters)
             if l1_hit:
                 logger.debug("Tier 0 L1 cache HIT for: '%s'", question[:50])
                 return l1_hit
@@ -542,7 +656,7 @@ class Medha:
             # --- Tier 1: Template Matching ---
             template_hit = await self._search_templates(question)
             if template_hit:
-                await self._store_in_l1(question, template_hit)
+                await self._store_in_l1(question, template_hit, filters)
                 logger.debug(
                     "Tier 1 template HIT: template='%s', confidence=%.3f",
                     template_hit.template_used,
@@ -555,12 +669,12 @@ class Medha:
             # Running them concurrently reduces wall-clock latency from
             # ~(t_exact + t_semantic) to ~max(t_exact, t_semantic).
             exact_hit, semantic_hit = await asyncio.gather(
-                self._search_exact(vector, collection_name),
-                self._search_semantic(vector, collection_name),
+                self._search_exact(vector, collection_name, filters),
+                self._search_semantic(vector, collection_name, filters),
             )
 
             if exact_hit:
-                await self._store_in_l1(question, exact_hit)
+                await self._store_in_l1(question, exact_hit, filters)
                 logger.debug(
                     "Tier 2 exact HIT: confidence=%.4f, query='%s'",
                     exact_hit.confidence,
@@ -570,7 +684,7 @@ class Medha:
             logger.debug("Tier 2 exact MISS (threshold=%.2f)", self._settings.score_threshold_exact)
 
             if semantic_hit:
-                await self._store_in_l1(question, semantic_hit)
+                await self._store_in_l1(question, semantic_hit, filters)
                 logger.debug(
                     "Tier 3 semantic HIT: confidence=%.4f, query='%s'",
                     semantic_hit.confidence,
@@ -580,9 +694,9 @@ class Medha:
             logger.debug("Tier 3 semantic MISS (threshold=%.2f)", self._settings.score_threshold_semantic)
 
             # --- Tier 4: Fuzzy Matching ---
-            fuzzy_hit = await self._search_fuzzy(question, vector, collection_name)
+            fuzzy_hit = await self._search_fuzzy(question, vector, collection_name, filters)
             if fuzzy_hit:
-                await self._store_in_l1(question, fuzzy_hit)
+                await self._store_in_l1(question, fuzzy_hit, filters)
                 logger.debug("Tier 4 fuzzy HIT: confidence=%.4f", fuzzy_hit.confidence)
                 return fuzzy_hit
             logger.debug("Tier 4 fuzzy MISS (threshold=%.1f)", self._settings.score_threshold_fuzzy)
@@ -596,13 +710,34 @@ class Medha:
 
     # --- Tier Implementations ---
 
-    async def _check_l1_cache(self, question: str) -> CacheHit | None:
+    @staticmethod
+    def _l1_key(question: str, filters: MetadataDict | None = None) -> str:
+        """L1 cache key for *question* as looked up under *filters*.
+
+        The key is the question hash, suffixed with a digest of the filters
+        when there are any. L1 is keyed by question alone, so without this a
+        filtered lookup would be served the entry an *unfiltered* search cached
+        earlier for the same question — the exact misdirection the filters were
+        asked to prevent, delivered before any tier that knows about metadata
+        gets to run.
+
+        An unfiltered search keeps the bare question hash it has always used,
+        so existing keys stay valid across the upgrade, and the question hash
+        is a prefix of every variant so ``invalidate()`` can reach them all.
+        """
+        base = question_hash(question)
+        fingerprint = metadata_fingerprint(filters or {})
+        return f"{base}:{fingerprint}" if fingerprint else base
+
+    async def _check_l1_cache(
+        self, question: str, filters: MetadataDict | None = None
+    ) -> CacheHit | None:
         """Check the L1 cache (pluggable backend).
 
-        Key: MD5 hash of normalized question.
+        Key: MD5 hash of the normalized question, namespaced by the filters.
         Returns: CacheHit with strategy=L1_CACHE if found and not expired, None otherwise.
         """
-        key = question_hash(question)
+        key = self._l1_key(question, filters)
         hit = await self._l1_backend.get(key)
         if hit is not None:
             if hit.expires_at is not None and hit.expires_at <= datetime.now(timezone.utc):
@@ -611,9 +746,11 @@ class Medha:
             return hit.model_copy(update={"strategy": SearchStrategy.L1_CACHE})
         return None
 
-    async def _store_in_l1(self, question: str, hit: CacheHit) -> None:
-        """Store a result in the L1 cache."""
-        key = question_hash(question)
+    async def _store_in_l1(
+        self, question: str, hit: CacheHit, filters: MetadataDict | None = None
+    ) -> None:
+        """Store a result in the L1 cache under the key for these filters."""
+        key = self._l1_key(question, filters)
         await self._l1_backend.set(key, hit)
         logger.debug(
             "L1 cache store: key=%s, strategy=%s",
@@ -712,27 +849,96 @@ class Medha:
             return None
         return best_hit
 
-    async def _search_exact(self, embedding: list[float], collection_name: str | None = None) -> CacheHit | None:
+    async def _fetch_candidates(
+        self,
+        collection_name: str,
+        vector: list[float],
+        limit: int,
+        score_threshold: float,
+        filters: MetadataDict | None,
+    ) -> list[CacheResult]:
+        """Retrieve candidates for a vector tier, applying *filters* if strict.
+
+        In strict mode the filter goes to the backend, which either pushes it
+        into its own query language or falls back to the base class post-filter
+        — either way nothing that fails the filter comes back.
+
+        In soft mode nothing is filtered here: the candidates are needed so the
+        tier can score them down rather than discard them, and a pushed-down
+        filter would have removed exactly the rows soft mode exists to keep.
+
+        An unfiltered search calls ``search()`` directly rather than routing
+        through ``search_filtered()``, which would only hand it straight back.
+        Keeping the common path on the method every backend implements means
+        this feature adds nothing to it — no extra frame, and nothing for a
+        backend that predates ``search_filtered`` to trip over.
+        """
+        if not filters or self._settings.metadata_filter_mode == "soft":
+            return await self._backend.search(
+                collection_name=collection_name,
+                vector=vector,
+                limit=limit,
+                score_threshold=score_threshold,
+            )
+        return await self._backend.search_filtered(
+            collection_name=collection_name,
+            vector=vector,
+            limit=limit,
+            score_threshold=score_threshold,
+            filters=filters,
+            overfetch=self._settings.metadata_filter_overfetch,
+        )
+
+    def _filter_penalty(
+        self, result: CacheResult, filters: MetadataDict | None
+    ) -> float:
+        """Multiplier applied to a candidate's score for its filter verdict.
+
+        1.0 when there is nothing to check or the entry matches. Otherwise
+        ``metadata_filter_soft_penalty`` in soft mode, and 0.0 in strict mode
+        — every tier requires a score strictly greater than zero, so a strict
+        mismatch that reaches scoring (the fuzzy full-scroll path, which has no
+        backend filter to lean on) can never win.
+        """
+        if not filters or metadata_matches(result.metadata, filters):
+            return 1.0
+        if self._settings.metadata_filter_mode == "soft":
+            return self._settings.metadata_filter_soft_penalty
+        return 0.0
+
+    async def _search_exact(
+        self,
+        embedding: list[float],
+        collection_name: str | None = None,
+        filters: MetadataDict | None = None,
+    ) -> CacheHit | None:
         """Search for exact vector match (score >= score_threshold_exact).
 
         Uses settings.score_threshold_exact (default 0.99).
         Returns the top-1 result if above threshold.
         """
-        results = await self._backend.search(
+        results = await self._fetch_candidates(
             collection_name=collection_name or self._collection_name,
             vector=embedding,
             limit=1,
             score_threshold=self._settings.score_threshold_exact,
+            filters=filters,
         )
         if results:
             r = results[0]
+            # 1.0 unless soft mode kept a mismatching entry, in which case the
+            # penalised score has to clear the tier threshold on its own.
+            score = r.score * self._filter_penalty(r, filters)
+            if score < self._settings.score_threshold_exact:
+                return None
             return CacheHit(
                 generated_query=r.generated_query,
                 response_summary=r.response_summary,
-                confidence=r.score,
+                confidence=score,
                 strategy=SearchStrategy.EXACT_MATCH,
                 template_used=r.template_id,
                 expires_at=r.expires_at,
+                metadata=r.metadata,
             )
         return None
 
@@ -761,7 +967,12 @@ class Medha:
         boosted = score * (1.0 + self._settings.feedback_boost_factor * trust)
         return min(1.0, boosted)
 
-    async def _search_semantic(self, embedding: list[float], collection_name: str | None = None) -> CacheHit | None:
+    async def _search_semantic(
+        self,
+        embedding: list[float],
+        collection_name: str | None = None,
+        filters: MetadataDict | None = None,
+    ) -> CacheHit | None:
         """Search for semantic similarity (score >= score_threshold_semantic).
 
         Uses settings.score_threshold_semantic (default 0.90).
@@ -780,17 +991,23 @@ class Medha:
         # can reach the threshold however good its feedback is.
         retrieval_threshold = threshold / (1.0 + boost_factor) if boost_factor else threshold
 
-        results = await self._backend.search(
+        results = await self._fetch_candidates(
             collection_name=collection_name or self._collection_name,
             vector=embedding,
             limit=3,
             score_threshold=retrieval_threshold,
+            filters=filters,
         )
         if not results:
             return None
 
+        # Soft mode is the only case where a candidate that fails the filter is
+        # still in this list, and it has to be re-ranked rather than trusted in
+        # backend order — a penalised top result can fall behind the next one.
+        soft_filtering = bool(filters) and self._settings.metadata_filter_mode == "soft"
+
         best: CacheResult | None
-        if boost_factor == 0.0:
+        if boost_factor == 0.0 and not soft_filtering:
             # Untouched 0.4.3 path: backends return results by descending score.
             best, best_score = results[0], results[0].score
         else:
@@ -798,6 +1015,7 @@ class Medha:
             best_score = 0.0
             for r in results:
                 adjusted = self._apply_feedback_boost(r.score, r.feedback_correct, r.feedback_incorrect)
+                adjusted *= self._filter_penalty(r, filters)
                 if adjusted >= threshold and (best is None or adjusted > best_score):
                     best, best_score = r, adjusted
 
@@ -813,10 +1031,15 @@ class Medha:
             strategy=SearchStrategy.SEMANTIC_MATCH,
             template_used=best.template_id,
             expires_at=best.expires_at,
+            metadata=best.metadata,
         )
 
     async def _search_fuzzy(
-        self, question: str, embedding: list[float] | None = None, collection_name: str | None = None
+        self,
+        question: str,
+        embedding: list[float] | None = None,
+        collection_name: str | None = None,
+        filters: MetadataDict | None = None,
     ) -> CacheHit | None:
         """Search using Levenshtein distance (optional, requires rapidfuzz).
 
@@ -843,9 +1066,13 @@ class Medha:
 
         def _score(candidate: CacheResult) -> float:
             ratio = fuzz.ratio(normalized, candidate.normalized_question) / 100.0
-            return self._apply_feedback_boost(
+            boosted = self._apply_feedback_boost(
                 ratio, candidate.feedback_correct, candidate.feedback_incorrect
             )
+            # Zero in strict mode when the entry carries the wrong scope, which
+            # matters on the scroll path below: it is the one place a candidate
+            # arrives without having passed a backend filter first.
+            return boosted * self._filter_penalty(candidate, filters)
 
         best_match: CacheResult | None = None
         best_score = 0.0
@@ -853,11 +1080,12 @@ class Medha:
 
         if embedding is not None:
             # Fast path: vector pre-filter → fuzzy only on top-K candidates
-            candidates = await self._backend.search(
+            candidates = await self._fetch_candidates(
                 collection_name=coll,
                 vector=embedding,
                 limit=self._settings.fuzzy_prefilter_top_k,
                 score_threshold=self._settings.score_threshold_fuzzy_prefilter,
+                filters=filters,
             )
             logger.debug(
                 "Fuzzy pre-filter: %d candidates (vector threshold=%.2f, top_k=%d)",
@@ -901,6 +1129,7 @@ class Medha:
                 strategy=SearchStrategy.FUZZY_MATCH,
                 template_used=best_match.template_id,
                 expires_at=best_match.expires_at,
+                metadata=best_match.metadata,
             )
         return None
 
@@ -913,6 +1142,8 @@ class Medha:
         response_summary: str | None = None,
         template_id: str | None = None,
         ttl: int | None = _UNSET,  # type: ignore[assignment]
+        *,
+        metadata: MetadataDict | None = None,
     ) -> bool:
         """Store a question-query pair in the cache.
 
@@ -923,10 +1154,25 @@ class Medha:
             generated_query: The SQL/Cypher/GraphQL query.
             response_summary: Optional response summary.
             template_id: Optional template intent identifier.
+            ttl: TTL in seconds. _UNSET = use the settings default.
+            metadata: Structured scope this entry is valid for, e.g.
+                ``{"resolved_date": "2026-08-12"}``. Only a search declaring
+                the same values in ``filters`` can be answered by it. Keys and
+                values must be flat scalars — see medha.utils.metadata.
+
+                The L1 entry written here is keyed for an *unfiltered* lookup,
+                as it has always been. A later filtered search computes a
+                different key, misses L1 and is served by the vector tier
+                instead: one extra round trip, never a wrong scope.
 
         Returns:
             True if stored successfully, False otherwise.
+
+        Raises:
+            ValueError: If the question is too long, or the metadata is not storable.
+            ConfigurationError: If metadata is given and the backend cannot store it.
         """
+        resolved_metadata = self._prepare_metadata(metadata)
         if not question or not question.strip():
             logger.warning("Store skipped: question is empty or whitespace-only")
             return False
@@ -964,6 +1210,7 @@ class Medha:
                 response_summary=response_summary,
                 template_id=template_id,
                 expires_at=expires_at,
+                metadata=resolved_metadata,
             )
 
             await self._backend.upsert(self._collection_name, [entry])
@@ -978,6 +1225,7 @@ class Medha:
                     strategy=SearchStrategy.EXACT_MATCH,
                     template_used=template_id,
                     expires_at=expires_at,
+                    metadata=resolved_metadata,
                 ),
             )
 
@@ -1019,6 +1267,10 @@ class Medha:
             logger.warning("store_batch: no valid entries to store")
             return False
         entries = valid_entries
+        # Validated up front, outside the try below: unusable metadata is a
+        # caller mistake, and silently storing the entry without its scope
+        # would leave it answering questions it was never meant to answer.
+        metadatas = [self._prepare_metadata(item.get("metadata")) for item in entries]
 
         try:
             logger.debug("Batch store started: %d entries", len(entries))
@@ -1053,7 +1305,7 @@ class Medha:
 
             # Build CacheEntry objects
             cache_entries = []
-            for item, embedding in zip(entries, embeddings, strict=False):
+            for item, embedding, meta in zip(entries, embeddings, metadatas, strict=False):
                 question = item["question"]
                 normalized = normalize_question(question)
                 entry = CacheEntry(
@@ -1065,13 +1317,14 @@ class Medha:
                     query_hash=query_hash(item["generated_query"]),
                     response_summary=item.get("response_summary"),
                     template_id=item.get("template_id"),
+                    metadata=meta,
                 )
                 cache_entries.append(entry)
 
             await self._backend.upsert(self._collection_name, cache_entries)
 
             # Populate L1 cache — consistent with store()
-            for item in entries:
+            for item, meta in zip(entries, metadatas, strict=False):
                 await self._store_in_l1(
                     item["question"],
                     CacheHit(
@@ -1080,6 +1333,7 @@ class Medha:
                         confidence=1.0,
                         strategy=SearchStrategy.EXACT_MATCH,
                         template_used=item.get("template_id"),
+                        metadata=meta,
                     ),
                 )
 
@@ -1178,7 +1432,10 @@ class Medha:
             logger.debug("invalidate: no entry found for '%s'", question[:50])
             return False
 
-        await self._l1_backend.invalidate(question_hash(question))
+        # Prefix, not the bare key: a question searched under filters is cached
+        # under a key namespaced by them, and all of those variants share the
+        # question hash as their prefix.
+        await self._l1_backend.invalidate_prefix(question_hash(question))
         logger.info(
             "Invalidated %d entr%s for '%s'",
             len(deleted_ids),
@@ -1405,7 +1662,9 @@ class Medha:
           - JSON array: ``[{"question": ..., "generated_query": ...}, ...]``
           - JSONL: one JSON object per line (same keys)
 
-        Optional per-entry keys: ``response_summary``, ``template_id``.
+        Optional per-entry keys: ``response_summary``, ``template_id``,
+        ``metadata`` (a flat object of scalars, e.g.
+        ``{"resolved_date": "2026-08-12"}``).
 
         Args:
             path: Path to the file.
@@ -1478,6 +1737,10 @@ class Medha:
                 response_summary=item.get("response_summary"),
                 template_id=item.get("template_id"),
                 expires_at=expires_at,
+                # Re-validated rather than carried over: callers reach this
+                # through store_many, warm_from_file and warm_from_dataframe,
+                # and only the first of those has already checked the item.
+                metadata=validate_metadata(item.get("metadata")),
             ))
         return entries
 
@@ -1496,7 +1759,8 @@ class Medha:
 
         Args:
             entries: List of dicts, each with at minimum 'question' and
-                'generated_query'. Optional keys: 'response_summary', 'template_id'.
+                'generated_query'. Optional keys: 'response_summary',
+                'template_id', 'metadata'.
             batch_size: Chunk size. Defaults to settings.batch_size.
             on_progress: Optional callback ``(done: int, total: int)`` called
                 after each chunk is upserted.
@@ -1513,6 +1777,10 @@ class Medha:
                 raise ValueError(f"store_many: entry {i} missing or empty 'question'")
             if not item.get("generated_query", "").strip():
                 raise ValueError(f"store_many: entry {i} missing or empty 'generated_query'")
+            try:
+                self._prepare_metadata(item.get("metadata"))
+            except ValueError as exc:
+                raise ValueError(f"store_many: entry {i} has invalid metadata: {exc}") from exc
 
         if not entries:
             return 0
@@ -1534,7 +1802,7 @@ class Medha:
         async def _upsert_chunk(chunk: list[dict[str, Any]], embeddings: list[list[float]]) -> None:
             cache_entries = self._build_cache_entries(chunk, embeddings, resolved_ttl)
             await self._backend.upsert(self._collection_name, cache_entries)
-            for item in chunk:
+            for item, entry in zip(chunk, cache_entries, strict=False):
                 await self._store_in_l1(
                     item["question"],
                     CacheHit(
@@ -1543,6 +1811,7 @@ class Medha:
                         confidence=1.0,
                         strategy=SearchStrategy.EXACT_MATCH,
                         template_used=item.get("template_id"),
+                        metadata=entry.metadata,
                     ),
                 )
 
@@ -1577,6 +1846,7 @@ class Medha:
         query_col: str = "generated_query",
         response_col: str = "response_summary",
         template_col: str | None = None,
+        metadata_cols: list[str] | None = None,
         batch_size: int | None = None,
         on_progress: Any = None,
         ttl: int | None = _UNSET,  # type: ignore[assignment]
@@ -1589,6 +1859,10 @@ class Medha:
             query_col: Column name for generated queries.
             response_col: Column name for optional response summaries.
             template_col: Column name for optional template IDs.
+            metadata_cols: Columns to lift into each entry's metadata, keyed by
+                column name — the natural shape for a warm-up table that
+                already has a ``resolved_date`` or ``tenant`` column. Missing
+                columns and null cells are skipped.
             batch_size: Override chunk size.
             on_progress: Optional ``(done, total)`` callback.
             ttl: TTL for new entries.
@@ -1620,6 +1894,19 @@ class Medha:
                 val = row.get(template_col)
                 if val is not None and pd.notna(val):
                     item["template_id"] = val
+            if metadata_cols:
+                meta: dict[str, Any] = {}
+                for col in metadata_cols:
+                    if col not in df.columns:
+                        continue
+                    val = row.get(col)
+                    if val is None or not pd.notna(val):
+                        continue
+                    # numpy scalars (int64, bool_, str_) are not instances of
+                    # the Python types metadata accepts; .item() unwraps them.
+                    meta[col] = val.item() if hasattr(val, "item") else val
+                if meta:
+                    item["metadata"] = meta
             rows.append(item)
 
         return await self.store_many(rows, batch_size=batch_size, on_progress=on_progress, ttl=ttl)
@@ -2000,17 +2287,23 @@ class Medha:
 
     # --- Sync Wrappers ---
 
-    def search_sync(self, question: str) -> CacheHit:
+    def search_sync(
+        self, question: str, *, filters: MetadataDict | None = None
+    ) -> CacheHit:
         """Synchronous wrapper for search()."""
-        return BaseEmbedder._run_sync(self.search(question))
+        return BaseEmbedder._run_sync(self.search(question, filters=filters))
 
     def search_batch_sync(
         self,
         questions: list[str],
         collection_name: str | None = None,
+        *,
+        filters: MetadataDict | list[MetadataDict | None] | None = None,
     ) -> list[CacheHit]:
         """Synchronous wrapper for search_batch()."""
-        return BaseEmbedder._run_sync(self.search_batch(questions, collection_name))
+        return BaseEmbedder._run_sync(
+            self.search_batch(questions, collection_name, filters=filters)
+        )
 
     def store_sync(self, question: str, generated_query: str, **kwargs: Any) -> bool:
         """Synchronous wrapper for store()."""

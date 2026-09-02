@@ -16,6 +16,8 @@ from medha.types import (
     CacheHit,
     CacheResult,
     CacheStats,
+    MetadataDict,
+    MetadataValue,
     PersistedStats,
     QueryTemplate,
     SearchStrategy,
@@ -105,6 +107,7 @@ except ImportError:
 __all__ = [
     "Medha", "Settings", "CacheHit", "QueryTemplate", "CacheEntry",
     "CacheResult", "CacheStats", "PersistedStats", "StrategyStats", "SearchStrategy",
+    "MetadataDict", "MetadataValue",
     "BaseEmbedder", "L1CacheBackend", "VectorStorageBackend",
     "InMemoryL1Cache", "RedisL1Cache", "setup_logging", "InMemoryBackend",
 ] + _optional

@@ -1146,6 +1146,56 @@ async with Medha(collection_name="my_cache", embedder=FastEmbedAdapter()) as cac
 
 ---
 
+## Metadata Filters
+
+Two questions that differ only by a date embed almost identically. "Revenue yesterday" and "revenue last Monday" are the same sentence with a different word in it, so the semantic tier can answer one with the other's query — at high confidence, with nothing in the result saying anything is wrong. The same holds for any scope the embedding does not separate: a time window, a tenant, a currency, a region.
+
+Store the scope with the entry, and demand it at search time:
+
+```python
+await cache.store(
+    "revenue for the period",
+    "SELECT SUM(amount) FROM sales WHERE day = '2026-08-12'",
+    metadata={"resolved_date": "2026-08-12"},
+)
+
+hit = await cache.search(
+    "revenue yesterday",
+    filters={"resolved_date": "2026-08-12"},
+)
+print(hit.metadata)   # {'resolved_date': '2026-08-12'} — the scope that answered
+```
+
+Resolve the period in your application, where "yesterday" means something, then hand Medha the resolved value. If nothing is cached for that day the search returns `NO_MATCH` and you generate the query as usual.
+
+**How matching works.** Every key in the filter must be present on the entry with the same value; extra keys on the entry are ignored. A key the entry does not carry is a mismatch, never a wildcard — so entries written before you adopted metadata never satisfy a filter, and keep answering unfiltered searches exactly as before.
+
+**What can go in.** A flat mapping of `str`, `int`, `float` and `bool` — up to 32 keys, string values up to 256 characters. Nesting is rejected rather than flattened: ten backends store metadata ten different ways, and a flat map of scalars is what all of them accept.
+
+**Where it applies.** The L1 cache, plus the exact, semantic and fuzzy tiers. Template matching (Tier 1) is untouched, because it renders a fresh query from the question text rather than returning a stored entry. Filtered lookups get their own L1 key, so an unfiltered answer cached earlier can never be handed to a filtered search.
+
+```python
+# Per-item on every write path
+await cache.store_batch([{"question": ..., "generated_query": ..., "metadata": {...}}])
+await cache.warm_from_dataframe(df, metadata_cols=["resolved_date", "tenant"])
+
+# One filter for the batch, or one per question
+hits = await cache.search_batch(
+    ["revenue yesterday", "revenue last Monday"],
+    filters=[{"resolved_date": "2026-08-12"}, {"resolved_date": "2026-08-10"}],
+)
+```
+
+By default a mismatch drops the candidate, so a scope with nothing cached returns `NO_MATCH` — the safe answer. `Settings.metadata_filter_mode="soft"` instead multiplies a mismatching candidate's confidence by `metadata_filter_soft_penalty`, so it survives only if it still clears the tier threshold.
+
+All ten backends store and return metadata; they differ only in whether the filter is evaluated by the storage engine (Qdrant natively for every type, pgvector/VectorChord/Elasticsearch/Chroma/LanceDB for string values) or in Python afterwards. Results are verified in Python regardless, so the answer is the same everywhere — the difference is speed, and recall on collections where many entries share a question. From the CLI:
+
+```bash
+medha search "revenue yesterday" --filter resolved_date=2026-08-12
+```
+
+---
+
 ## Observability
 
 ### CacheStats
@@ -1564,14 +1614,15 @@ asyncio.run(main())
 | Class / Method | Description |
 |---|---|
 | `Medha` | Core cache class with waterfall search |
-| `Medha.search(question)` | Waterfall search → `CacheHit` |
-| `Medha.store(question, query, *, ttl)` | Store a question-query pair with optional TTL |
+| `Medha.search(question, *, filters)` | Waterfall search → `CacheHit`; `filters` restricts to a metadata scope |
+| `Medha.search_batch(questions, *, filters)` | Batch search; `filters` takes one mapping or one per question |
+| `Medha.store(question, query, *, ttl, metadata)` | Store a question-query pair with optional TTL and scope |
 | `Medha.store_batch(entries)` | Bulk store — single embedding round-trip |
 | `Medha.store_many(entries, *, batch_size, on_progress, ttl)` | Chunked bulk upsert with concurrency control |
 | `Medha.warm_from_file(path, *, ttl)` | Pre-populate cache from JSON / JSONL file |
-| `Medha.warm_from_dataframe(df, *, ttl)` | Pre-populate cache from a pandas DataFrame |
+| `Medha.warm_from_dataframe(df, *, ttl, metadata_cols)` | Pre-populate cache from a pandas DataFrame |
 | `Medha.export_to_dataframe(collection_name)` | Export collection to a pandas DataFrame |
-| `Medha.dedup_collection(collection_name)` | Remove duplicate entries (same `query_hash`) |
+| `Medha.dedup_collection(collection_name)` | Remove duplicate entries (same `query_hash` **and** metadata) |
 | `Medha.expire(collection_name)` | Delete all expired entries; returns count |
 | `Medha.invalidate(question)` | Remove entry by exact question text; returns `bool` |
 | `Medha.invalidate_by_query_hash(hash)` | Remove all entries with a given query hash |
@@ -1592,7 +1643,8 @@ asyncio.run(main())
 |---|---|
 | `Settings` | Pydantic configuration with env var support (`MEDHA_` prefix) |
 | `Settings.feedback_incorrect_threshold` | Auto-invalidate a cache entry when its incorrect-feedback count reaches N |
-| `CacheHit` | Search result: `generated_query`, `confidence`, `strategy`, `expires_at` |
+| `Settings.metadata_filter_mode` | `"strict"` (default) drops a filter mismatch; `"soft"` only lowers its confidence |
+| `CacheHit` | Search result: `generated_query`, `confidence`, `strategy`, `expires_at`, `metadata` |
 | `CacheStats` | Immutable stats snapshot: hit/miss rates, latency percentiles, per-strategy breakdown |
 | `StrategyStats` | Per-strategy `count`, `total_latency_ms`, `avg_latency_ms` |
 | `QueryTemplate` | Parameterized question-to-query template |

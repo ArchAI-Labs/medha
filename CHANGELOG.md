@@ -5,6 +5,147 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Metadata filters.** Entries can carry a structured scope, and a search can
+  demand one. Questions that differ only by a date, a time window, a tenant, a
+  currency or a region embed almost identically, so the semantic tier could
+  answer one with another's query at high confidence — and nothing in the
+  result said so.
+
+  ```python
+  await cache.store(
+      "revenue for the period",
+      "SELECT SUM(amount) FROM sales WHERE day = '2026-08-12'",
+      metadata={"resolved_date": "2026-08-12"},
+  )
+  hit = await cache.search("revenue yesterday", filters={"resolved_date": "2026-08-12"})
+  ```
+
+  A filter is satisfied when every key it names is present on the entry with
+  the same value. A key the entry does not carry is a mismatch, never a
+  wildcard. Searching without `filters` behaves exactly as before.
+
+- **`metadata=`** on `store()`, `store_batch()`, `store_many()` and
+  `warm_from_file()` (a `"metadata"` key per item), plus **`metadata_cols=`**
+  on `warm_from_dataframe()`. **`filters=`** on `search()`, `search_batch()`
+  and their sync wrappers; `search_batch()` accepts one mapping for the batch
+  or one per question, with `None` in a slot meaning unfiltered.
+
+- **`CacheEntry.metadata`**, **`CacheResult.metadata`** and
+  **`CacheHit.metadata`** — the last so a caller can see which scope actually
+  answered. Empty for a template hit, which has no stored entry behind it.
+  **`MetadataDict`** and **`MetadataValue`** are exported from `medha`.
+
+- **`medha.utils.metadata`**: validation, canonical encoding, and the matching
+  rule. Values are a flat map of `str`/`int`/`float`/`bool` — at most 32 keys,
+  string values at most 256 characters, keys matching
+  `^[A-Za-z_][A-Za-z0-9_.-]{0,63}$`. `True` never equals `1`; `10` and `10.0`
+  are the same value, because not every backend preserves the distinction.
+
+- **`VectorStorageBackend.search_filtered()`**: the method `Medha` now calls.
+  It is **not** abstract — it ships with an over-fetch-and-filter default, so a
+  custom backend keeps working unchanged and gains filtering as soon as it
+  round-trips metadata. `search()` remains the primitive every backend
+  implements, and its signature is untouched.
+
+- **`VectorStorageBackend.supports_metadata`** (default `False`): a backend
+  that does not store metadata would return every entry with an empty map,
+  turning every filtered search into a silent `NO_MATCH`. Passing `filters` or
+  `metadata` to one now raises `ConfigurationError` instead. All ten built-in
+  backends set it to `True`.
+
+- **Native filter pushdown**, where the dialect can express the constraint
+  exactly: Qdrant for every value type, pgvector and VectorChord via
+  `metadata @> $n::jsonb`, Elasticsearch via a `term` on a `flattened` field,
+  Chroma via its `where` clause, LanceDB as a scan-narrowing predicate.
+  Everything else is filtered in Python. Results are verified in Python
+  whatever the engine did, so the answer is identical across backends; the
+  difference is speed and recall.
+
+- **`PgVectorBackend.metadata_index_sql()`** / `VectorChordBackend`: returns the
+  `CREATE INDEX CONCURRENTLY ... USING gin (metadata)` statement for a
+  collection, to run when you want it. See the upgrade notes below.
+
+- **`L1CacheBackend.invalidate_prefix()`**: non-abstract, defaulting to
+  `clear()`. `InMemoryL1Cache` scans its keys; `RedisL1Cache` uses `SCAN`.
+
+- **`Settings.metadata_filter_mode`** (`"strict"` default / `"soft"`),
+  **`metadata_filter_soft_penalty`** (`0.5`) and
+  **`metadata_filter_overfetch`** (`10`). Env vars `MEDHA_METADATA_FILTER_*`.
+
+- **`medha search --filter KEY=VALUE`** (short `-f`, repeatable). Values are
+  compared as strings — no coercion is attempted, since guessing would break a
+  tenant genuinely named `10`. `--json` output gains `metadata`.
+
+### Changed
+
+- **`dedup_collection()` groups by query hash *and* metadata.** The same query
+  stored under two scopes is two entries; collapsing them would leave the
+  survivor answering for a scope it was never stored under. Entries without
+  metadata deduplicate exactly as before.
+
+- **`Medha.invalidate()` calls `invalidate_prefix()`** on the L1 cache. A
+  question searched under filters is cached under a key namespaced by them, and
+  invalidating the question has to reach every variant.
+
+- **The L1 key for a filtered search** is the question hash plus a digest of
+  the filters. Unfiltered searches keep the bare question hash they have always
+  used, so a populated cache stays valid across the upgrade.
+
+- pgvector and VectorChord now share one query builder (`_vector_search_sql`);
+  the statement was duplicated between them. Elasticsearch's `num_candidates`
+  follows the fetch size when a Python-side filter widens it.
+
+- **CI** installs the backend drivers on one matrix version. They need no
+  service — only the driver — and being installed nowhere meant every mocked
+  backend unit test and both in-process e2e suites were skipped at collection:
+  roughly a quarter of the suite never ran.
+
+### Fixed
+
+- **Qdrant `scroll()` dropped `expires_at`.** It rebuilt `CacheResult` inline
+  instead of reusing `_point_to_cache_result`, and the copy had drifted. It now
+  shares the one conversion, which also means `dedup_collection()` and
+  `export_to_dataframe()` see expiry and metadata.
+
+- The LanceDB unit-test fixture never exposed a table schema, so every test
+  calling `initialize()` died inside a migration it was never meant to trigger.
+  Invisible until the driver was installed in CI.
+
+### Upgrade notes
+
+- **Existing entries carry no metadata**, so they never satisfy a filter. This
+  is deliberate — they were not stored for any scope — but it means a filtered
+  search against a collection you have been filling for months returns
+  `NO_MATCH` until those entries are re-stored with their scope. Unfiltered
+  searches are unaffected.
+
+- **Schema migration is automatic and cheap**, except where noted. Qdrant and
+  Chroma need none; Elasticsearch, Weaviate and Azure AI Search take a
+  metadata-only mapping update; pgvector and VectorChord add a column with a
+  default, which PostgreSQL 11 and later record in the catalog without
+  rewriting the table. **LanceDB materialises the new column**, at a cost
+  proportional to the table.
+
+- **No GIN index is created for you.** A plain `CREATE INDEX` locks the table
+  for the whole build, and on an existing deployment it would index a column
+  that is `{}` in every row written before the upgrade. `metadata @>` works
+  without it. Add one with `metadata_index_sql()` when a collection holds
+  enough entries carrying metadata to make the scan hurt.
+
+- **Breaking for custom `L1CacheBackend` implementations.**
+  `Medha.invalidate()` now calls `invalidate_prefix()`, whose default
+  implementation clears the whole cache. Override it with a prefix scan to
+  restore per-key invalidation. Both shipped backends already do.
+
+- **Custom `VectorStorageBackend` implementations need no changes.**
+  `search_filtered()` and `supports_metadata` both have defaults; a backend
+  that does not opt in simply refuses filters instead of silently mishandling
+  them.
+
 ## [0.5.0] — 2026-08-04
 
 ### Added

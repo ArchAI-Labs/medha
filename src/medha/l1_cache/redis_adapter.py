@@ -128,6 +128,30 @@ class RedisL1Cache(L1CacheBackend):
         except Exception as exc:
             logger.warning("RedisL1Cache.invalidate failed (key=%s…): %s", key[:8], exc)
 
+    async def invalidate_prefix(self, prefix: str) -> None:
+        """Delete the keys under *prefix* with a cursor scan, not a flush.
+
+        ``scan_iter`` is used rather than ``keys``: it does not block the
+        server on a large keyspace, and the base-class default this replaces
+        would have dropped every other instance's entries too.
+
+        Keys are collected and deleted in batches so a scan that matches
+        thousands of entries does not issue thousands of round-trips.
+        """
+        batch: list[str] = []
+        try:
+            async for rkey in self._client.scan_iter(match=f"{self._key(prefix)}*", count=500):
+                batch.append(rkey)
+                if len(batch) >= 500:
+                    await self._client.delete(*batch)
+                    batch.clear()
+            if batch:
+                await self._client.delete(*batch)
+        except Exception as exc:
+            logger.warning(
+                "RedisL1Cache.invalidate_prefix failed (prefix=%s…): %s", prefix[:8], exc
+            )
+
     @property
     def size(self) -> int:
         """Local size hint — not decremented when Redis evicts entries."""

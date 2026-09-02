@@ -5,11 +5,19 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any
 
-from medha.types import CacheEntry, CacheResult, PersistedStats
+from medha.types import CacheEntry, CacheResult, MetadataDict, PersistedStats
+from medha.utils.metadata import filter_fetch_size, verify_filters
 
 
 class VectorStorageBackend(ABC):
     """Abstract base class for vector storage backends."""
+
+    #: Whether this backend stores and returns ``CacheEntry.metadata``.
+    #: ``Medha`` refuses a filtered search against a backend that does not,
+    #: because every entry would come back with empty metadata and every
+    #: filtered search would silently return NO_MATCH. Backends set this to
+    #: True once their upsert/read path round-trips metadata.
+    supports_metadata: bool = False
 
     @abstractmethod
     async def initialize(self, collection_name: str, dimension: int, **kwargs: Any) -> None:
@@ -204,6 +212,53 @@ class VectorStorageBackend(ABC):
         ...
 
     # --- Optional overrides (non-abstract: subclasses keep working unchanged) ---
+
+    async def search_filtered(
+        self,
+        collection_name: str,
+        vector: list[float],
+        limit: int = 5,
+        score_threshold: float = 0.0,
+        filters: MetadataDict | None = None,
+        overfetch: int = 10,
+    ) -> list[CacheResult]:
+        """Search for similar vectors, keeping only entries matching *filters*.
+
+        This is the method ``Medha`` calls; :meth:`search` stays the primitive
+        every backend must implement. The default implementation over-fetches
+        and filters in Python, so a backend gains metadata filtering as soon as
+        it round-trips ``CacheEntry.metadata`` — no change to its ``search()``
+        signature, and none at all for a third-party backend.
+
+        Backends whose query language can express the filter override this and
+        push it down, which is both faster and exact. The default is neither:
+        it can only filter what the unfiltered top-N happened to contain, so a
+        match ranked below ``limit * overfetch`` is missed. Recall loss, never
+        a wrong answer — a returned entry always satisfies the filter.
+
+        Args:
+            collection_name: Collection to search.
+            vector: Query vector.
+            limit: Max number of results to return *after* filtering.
+            score_threshold: Minimum similarity score (0.0 - 1.0).
+            filters: Exact-match metadata constraints, ANDed. None or empty
+                means no filtering, in which case this is exactly ``search()``.
+            overfetch: How many candidates to retrieve per requested result.
+                Ignored by backends that filter natively.
+
+        Returns:
+            List of CacheResult, sorted by descending score, each matching
+            every filter.
+
+        Raises:
+            StorageError: If the search fails.
+        """
+        if not filters:
+            return await self.search(collection_name, vector, limit, score_threshold)
+
+        fetch = filter_fetch_size(limit, filters, overfetch)
+        candidates = await self.search(collection_name, vector, fetch, score_threshold)
+        return verify_filters(candidates, filters, limit)
 
     async def load_stats(self, collection_name: str) -> PersistedStats | None:
         """Load persisted statistics for the collection, or None if not yet saved.

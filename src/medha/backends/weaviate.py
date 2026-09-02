@@ -9,6 +9,7 @@ from uuid import NAMESPACE_DNS, UUID, uuid5
 from medha.exceptions import ConfigurationError, StorageError, StorageInitializationError
 from medha.interfaces.storage import VectorStorageBackend
 from medha.types import CacheEntry, CacheResult, PersistedStats
+from medha.utils.metadata import dumps_metadata, loads_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +71,10 @@ def _collection_properties() -> list[Any]:
         wvc.config.Property(name="feedback_incorrect", data_type=wvc.config.DataType.INT),
         wvc.config.Property(name="created_at", data_type=wvc.config.DataType.DATE),
         wvc.config.Property(name="expires_at", data_type=wvc.config.DataType.DATE),
+        # camelCase to match the statsJson property; a JSON string because
+        # Weaviate declares properties up front and metadata keys do not exist
+        # until an entry supplies them.
+        wvc.config.Property(name="metadataJson", data_type=text),
     ]
 
 
@@ -86,6 +91,7 @@ def _entry_to_properties(entry: CacheEntry) -> dict[str, Any]:
         "feedback_incorrect": entry.feedback_incorrect,
         "created_at": entry.created_at,
         "expires_at": entry.expires_at,
+        "metadataJson": dumps_metadata(entry.metadata),
     }
 
 
@@ -105,11 +111,14 @@ def _obj_to_result(obj: Any, score: float) -> CacheResult:
         feedback_incorrect=int(props.get("feedback_incorrect") or 0),
         created_at=props.get("created_at"),
         expires_at=props.get("expires_at"),
+        metadata=loads_metadata(props.get("metadataJson")),
     )
 
 
 class WeaviateBackend(VectorStorageBackend):
     """Weaviate v4 vector backend. Supports local and cloud modes."""
+
+    supports_metadata = True
 
     def __init__(self, settings: Any = None) -> None:
         if not HAS_WEAVIATE:

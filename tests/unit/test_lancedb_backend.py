@@ -99,7 +99,15 @@ def _make_merge_chain() -> MagicMock:
 
 @pytest.fixture
 def mock_lancedb_table():
+    from medha.backends.lancedb import _build_schema
+
     table = MagicMock()
+    # A real schema, matching what the code expects a current table to carry.
+    # Left as a bare MagicMock, `set(table.schema.names)` iterates to nothing,
+    # so _reconcile_schema concludes the table is missing every column — id and
+    # vector included — and every test that calls initialize() dies inside a
+    # migration it was never meant to trigger.
+    table.schema = _build_schema(DIM)
     table.vector_search = MagicMock(return_value=_make_search_chain())
     table.query.return_value = _make_query_chain()
     table.merge_insert.return_value = _make_merge_chain()

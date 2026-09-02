@@ -4,10 +4,14 @@ import logging
 import uuid
 from typing import Any
 
-from medha.backends._asyncpg_mixin import _AsyncpgBackendMixin, _row_to_cache_result
+from medha.backends._asyncpg_mixin import (
+    _AsyncpgBackendMixin,
+    _row_to_cache_result,
+)
 from medha.exceptions import ConfigurationError, StorageError, StorageInitializationError
 from medha.interfaces.storage import VectorStorageBackend
 from medha.types import CacheEntry, CacheResult
+from medha.utils.metadata import canonical_json
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +25,8 @@ except ImportError:
 
 class PgVectorBackend(_AsyncpgBackendMixin, VectorStorageBackend):
     """PostgreSQL + pgvector backend. Requires asyncpg and pgvector packages."""
+
+    supports_metadata = True
 
     def __init__(self, settings: Any = None) -> None:
         if not HAS_PGVECTOR:
@@ -123,6 +129,8 @@ class PgVectorBackend(_AsyncpgBackendMixin, VectorStorageBackend):
                         WHERE expires_at IS NOT NULL
                 """)
 
+                await conn.execute(self._metadata_ddl(table))
+
                 await conn.execute(self._stats_table_ddl())
 
         except asyncpg.PostgresError as e:
@@ -142,33 +150,12 @@ class PgVectorBackend(_AsyncpgBackendMixin, VectorStorageBackend):
         if self._pool is None:
             raise StorageError("Not connected. Call connect() first.")
 
-        schema = self._settings.pg_schema
-        table = self._table_name(collection_name)
-
-        sql = f"""
-            SELECT
-                id::text,
-                original_question,
-                normalized_question,
-                generated_query,
-                query_hash,
-                response_summary,
-                template_id,
-                usage_count,
-                feedback_correct,
-                feedback_incorrect,
-                created_at,
-                expires_at,
-                (1 - (vector <=> $1::vector))::float AS score
-            FROM {schema}.{table}
-            WHERE (1 - (vector <=> $1::vector)) >= $2
-              AND (expires_at IS NULL OR expires_at > NOW())
-            ORDER BY vector <=> $1::vector
-            LIMIT $3
-        """
+        sql, params = self._vector_search_sql(
+            collection_name, vector, score_threshold, limit
+        )
         try:
             async with self._pool.acquire() as conn:
-                rows = await conn.fetch(sql, vector, score_threshold, limit)
+                rows = await conn.fetch(sql, *params)
         except asyncpg.PostgresError as e:
             raise StorageError(f"PgVector operation failed on '{collection_name}': {e}") from e
 
@@ -188,9 +175,9 @@ class PgVectorBackend(_AsyncpgBackendMixin, VectorStorageBackend):
                 id, vector, original_question, normalized_question,
                 generated_query, query_hash, response_summary,
                 template_id, usage_count, feedback_correct, feedback_incorrect,
-                created_at, expires_at
+                created_at, expires_at, metadata
             )
-            VALUES ($1, $2::vector, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+            VALUES ($1, $2::vector, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb)
             ON CONFLICT (id) DO UPDATE SET
                 vector              = EXCLUDED.vector,
                 original_question   = EXCLUDED.original_question,
@@ -203,7 +190,8 @@ class PgVectorBackend(_AsyncpgBackendMixin, VectorStorageBackend):
                 feedback_correct    = EXCLUDED.feedback_correct,
                 feedback_incorrect  = EXCLUDED.feedback_incorrect,
                 created_at          = EXCLUDED.created_at,
-                expires_at          = EXCLUDED.expires_at
+                expires_at          = EXCLUDED.expires_at,
+                metadata            = EXCLUDED.metadata
         """
         try:
             async with self._pool.acquire() as conn:
@@ -222,6 +210,9 @@ class PgVectorBackend(_AsyncpgBackendMixin, VectorStorageBackend):
                         entry.feedback_incorrect,
                         entry.created_at,
                         entry.expires_at,
+                        # asyncpg's default jsonb codec takes the encoded text;
+                        # canonical_json always yields an object, "{}" included.
+                        canonical_json(entry.metadata),
                     )
                     for entry in entries
                 ])

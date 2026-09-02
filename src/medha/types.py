@@ -5,6 +5,12 @@ from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, Field
 
+# Structured scope attached to an entry and matched exactly by a filtered
+# search. Flat and scalar because that is what all ten storage backends can
+# hold and filter on; see medha.utils.metadata for the validation rules.
+MetadataValue = str | int | float | bool
+MetadataDict = dict[str, MetadataValue]
+
 
 class StrategyStats(BaseModel):
     """Per-strategy hit count and total latency."""
@@ -119,6 +125,15 @@ class CacheHit(BaseModel):
     expires_at: datetime | None = Field(
         default=None, description="UTC expiry timestamp; None means immortal"
     )
+    metadata: MetadataDict = Field(
+        default_factory=dict,
+        description=(
+            "Structured scope of the entry that produced this hit, so the "
+            "caller can see which date, tenant or window was actually served. "
+            "Empty for template hits, which render a query from the question "
+            "itself rather than returning a stored entry."
+        ),
+    )
 
 
 class QueryTemplate(BaseModel):
@@ -175,6 +190,14 @@ class CacheEntry(BaseModel):
             "Se nel passato, l'entry viene esclusa dalle ricerche."
         ),
     )
+    metadata: MetadataDict = Field(
+        default_factory=dict,
+        description=(
+            "Structured scope the entry is valid for, e.g. "
+            "{'resolved_date': '2026-08-12'}. A search declaring filters only "
+            "matches entries whose metadata carries those exact values."
+        ),
+    )
 
 
 class CacheResult(BaseModel):
@@ -193,3 +216,10 @@ class CacheResult(BaseModel):
     feedback_incorrect: int = Field(default=0)
     created_at: datetime | None = None
     expires_at: datetime | None = Field(default=None, description="Scadenza dell'entry, se impostata.")
+    metadata: MetadataDict = Field(
+        default_factory=dict,
+        description=(
+            "Structured scope stored with the entry. Empty for entries written "
+            "before metadata existed, which therefore never match a filter."
+        ),
+    )

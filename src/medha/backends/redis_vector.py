@@ -9,6 +9,7 @@ from typing import Any
 from medha.exceptions import ConfigurationError, StorageError, StorageInitializationError
 from medha.interfaces.storage import VectorStorageBackend
 from medha.types import CacheEntry, CacheResult, PersistedStats
+from medha.utils.metadata import dumps_metadata, loads_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -117,11 +118,14 @@ def _doc_to_result(doc: Any, score: float) -> CacheResult:
         feedback_incorrect=int(_get("feedback_incorrect", 0) or 0),
         created_at=created_at,
         expires_at=expires_at,
+        metadata=loads_metadata(_get("metadata_json", "")),
     )
 
 
 class RedisVectorBackend(VectorStorageBackend):
     """Redis Stack (RediSearch) vector backend. Supports standalone and sentinel modes."""
+
+    supports_metadata = True
 
     def __init__(self, settings: Any = None) -> None:
         if not HAS_REDIS:
@@ -262,7 +266,7 @@ class RedisVectorBackend(VectorStorageBackend):
                     "original_question", "normalized_question", "generated_query",
                     "query_hash", "response_summary", "template_id",
                     "usage_count", "feedback_correct", "feedback_incorrect",
-                    "created_at", "expires_at", "__score",
+                    "created_at", "expires_at", "metadata_json", "__score",
                 )
                 .paging(0, limit)
                 .dialect(2)
@@ -318,6 +322,11 @@ class RedisVectorBackend(VectorStorageBackend):
                     "feedback_incorrect": entry.feedback_incorrect,
                     "created_at": created_at,
                     "expires_at": expires_at,
+                    # Stored but not indexed: RediSearch needs one declared
+                    # field per filterable key, and the keys are the caller's
+                    # to invent. FT.SEARCH still loads it for RETURN, which is
+                    # all the base class post-filter needs.
+                    "metadata_json": dumps_metadata(entry.metadata),
                     "vector": vec_bytes,
                 }
                 pipe.hset(f"{col_key}:{entry.id}", mapping=mapping)
@@ -340,7 +349,7 @@ class RedisVectorBackend(VectorStorageBackend):
             "original_question", "normalized_question", "generated_query",
             "query_hash", "response_summary", "template_id",
             "usage_count", "feedback_correct", "feedback_incorrect",
-            "created_at", "expires_at",
+            "created_at", "expires_at", "metadata_json",
         ]
         if with_vectors:
             return_fields.append("vector")
@@ -398,7 +407,7 @@ class RedisVectorBackend(VectorStorageBackend):
                     "original_question", "normalized_question", "generated_query",
                     "query_hash", "response_summary", "template_id",
                     "usage_count", "feedback_correct", "feedback_incorrect",
-                    "created_at", "expires_at",
+                    "created_at", "expires_at", "metadata_json",
                 )
                 .paging(0, 1)
                 .dialect(2)
@@ -473,7 +482,7 @@ class RedisVectorBackend(VectorStorageBackend):
                     "original_question", "normalized_question", "generated_query",
                     "query_hash", "response_summary", "template_id",
                     "usage_count", "feedback_correct", "feedback_incorrect",
-                    "created_at", "expires_at",
+                    "created_at", "expires_at", "metadata_json",
                 )
                 .paging(0, 1)
                 .dialect(2)

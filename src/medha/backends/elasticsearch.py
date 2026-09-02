@@ -8,7 +8,13 @@ from typing import Any
 
 from medha.exceptions import ConfigurationError, StorageError, StorageInitializationError
 from medha.interfaces.storage import VectorStorageBackend
-from medha.types import CacheEntry, CacheResult, PersistedStats
+from medha.types import CacheEntry, CacheResult, MetadataDict, PersistedStats
+from medha.utils.metadata import (
+    filter_fetch_size,
+    loads_metadata,
+    split_filters,
+    verify_filters,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,11 +56,17 @@ def _index_properties(dimension: int) -> dict[str, dict[str, Any]]:
         "feedback_incorrect": {"type": "integer"},
         "created_at": {"type": "date"},
         "expires_at": {"type": "date"},
+        # 'flattened' indexes every sub-key as a keyword without adding a
+        # mapping field per key — the whole point here, since metadata keys are
+        # chosen by the caller and would otherwise explode the mapping.
+        "metadata": {"type": "flattened"},
     }
 
 
 class ElasticsearchBackend(VectorStorageBackend):
     """Elasticsearch 8.x backend. Requires elasticsearch[async]>=8.12."""
+
+    supports_metadata = True
 
     def __init__(self, settings: Any = None) -> None:
         if not HAS_ELASTICSEARCH:
@@ -175,17 +187,15 @@ class ElasticsearchBackend(VectorStorageBackend):
             index,
         )
 
-    async def search(
-        self,
-        collection_name: str,
-        vector: list[float],
-        limit: int = 5,
-        score_threshold: float = 0.0,
-    ) -> list[CacheResult]:
-        if self._client is None:
-            raise StorageError("Not connected. Call connect() first.")
-        index = self._index_name(collection_name)
-        ttl_filter = {
+    @staticmethod
+    def _knn_filter(pushable: MetadataDict) -> dict[str, Any]:
+        """The knn filter: not expired, plus one term per pushed-down key.
+
+        ``metadata`` is a ``flattened`` field, so every sub-key is indexed as a
+        keyword and ``metadata.<key>`` is directly termable without the mapping
+        having to know the key in advance.
+        """
+        ttl_filter: dict[str, Any] = {
             "bool": {
                 "should": [
                     {"bool": {"must_not": {"exists": {"field": "expires_at"}}}},
@@ -193,15 +203,56 @@ class ElasticsearchBackend(VectorStorageBackend):
                 ]
             }
         }
+        if not pushable:
+            return ttl_filter
+        terms = [{"term": {f"metadata.{key}": value}} for key, value in pushable.items()]
+        return {"bool": {"filter": [ttl_filter, *terms]}}
+
+    async def search(
+        self,
+        collection_name: str,
+        vector: list[float],
+        limit: int = 5,
+        score_threshold: float = 0.0,
+    ) -> list[CacheResult]:
+        return await self.search_filtered(
+            collection_name, vector, limit, score_threshold, filters=None
+        )
+
+    async def search_filtered(
+        self,
+        collection_name: str,
+        vector: list[float],
+        limit: int = 5,
+        score_threshold: float = 0.0,
+        filters: MetadataDict | None = None,
+        overfetch: int = 10,
+    ) -> list[CacheResult]:
+        """Search with the string constraints pushed into the knn filter.
+
+        Only strings go down. A ``flattened`` field indexes every leaf value as
+        a keyword — ``10`` is stored as ``"10"``, ``true`` as ``"true"`` — so a
+        term carrying a number or a boolean depends on how the client and the
+        engine happen to stringify it. Strings have no such ambiguity;
+        everything else is checked in Python.
+
+        Raises:
+            StorageError: If the search fails.
+        """
+        if self._client is None:
+            raise StorageError("Not connected. Call connect() first.")
+        index = self._index_name(collection_name)
+        pushable, residual = split_filters(filters)
+        fetch = filter_fetch_size(limit, residual, overfetch)
         query = {
             "knn": {
                 "field": "vector",
                 "query_vector": vector,
-                "k": limit,
-                "num_candidates": self._settings.es_num_candidates,
-                "filter": ttl_filter,
+                "k": fetch,
+                "num_candidates": max(self._settings.es_num_candidates, fetch),
+                "filter": self._knn_filter(pushable),
             },
-            "size": limit,
+            "size": fetch,
             "_source": {
                 "excludes": ["vector"]
             },
@@ -220,7 +271,7 @@ class ElasticsearchBackend(VectorStorageBackend):
                 continue
             src = hit["_source"]
             results.append(_hit_to_cache_result(hit["_id"], src, score))
-        return results
+        return verify_filters(results, filters, limit)
 
     async def upsert(self, collection_name: str, entries: list[CacheEntry]) -> None:
         if self._client is None:
@@ -243,6 +294,7 @@ class ElasticsearchBackend(VectorStorageBackend):
                     "feedback_incorrect": entry.feedback_incorrect,
                     "created_at": _dt_to_str(entry.created_at),
                     "vector": entry.vector,
+                    "metadata": dict(entry.metadata),
                 }
                 if entry.expires_at is not None:
                     doc["expires_at"] = _dt_to_str(entry.expires_at)
@@ -573,4 +625,5 @@ def _hit_to_cache_result(doc_id: str, src: dict[str, Any], score: float) -> Cach
         feedback_incorrect=src.get("feedback_incorrect", 0),
         created_at=_parse_dt(src.get("created_at")),
         expires_at=_parse_dt(src.get("expires_at")),
+        metadata=loads_metadata(src.get("metadata")),
     )

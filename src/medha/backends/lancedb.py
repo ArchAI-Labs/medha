@@ -2,6 +2,7 @@
 
 import contextlib
 import inspect
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Any
@@ -9,7 +10,14 @@ from typing import Any
 from medha.backends._escape import quote_sql_literal
 from medha.exceptions import ConfigurationError, StorageError, StorageInitializationError
 from medha.interfaces.storage import VectorStorageBackend
-from medha.types import CacheEntry, CacheResult, PersistedStats
+from medha.types import CacheEntry, CacheResult, MetadataDict, PersistedStats
+from medha.utils.metadata import (
+    dumps_metadata,
+    filter_fetch_size,
+    loads_metadata,
+    split_filters,
+    verify_filters,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +64,10 @@ def _build_schema(dimension: int) -> "pa.Schema":
         pa.field("feedback_incorrect", pa.int64()),
         pa.field("created_at", pa.string()),
         pa.field("expires_at", pa.string()),
+        # A JSON string, not a struct: LanceDB fixes the schema at creation and
+        # metadata keys are only known per entry, so a struct would need a
+        # schema migration on every new key.
+        pa.field("metadata_json", pa.string()),
     ])
 
 
@@ -107,6 +119,7 @@ def _entry_to_row(entry: CacheEntry) -> dict[str, Any]:
         "feedback_incorrect": entry.feedback_incorrect,
         "created_at": entry.created_at.isoformat() if entry.created_at else "",
         "expires_at": entry.expires_at.isoformat() if entry.expires_at else "",
+        "metadata_json": dumps_metadata(entry.metadata),
     }
 
 
@@ -133,6 +146,7 @@ def _row_to_result(row: dict[str, Any], score: float) -> CacheResult:
         feedback_incorrect=int(row.get("feedback_incorrect") or 0),
         created_at=created_at,
         expires_at=expires_at,
+        metadata=loads_metadata(row.get("metadata_json")),
     )
 
 
@@ -155,6 +169,8 @@ class LanceDBBackend(VectorStorageBackend):
     Local mode requires no external services; cloud URIs (s3://, gs://, az://)
     require the appropriate credentials to be set in the environment.
     """
+
+    supports_metadata = True
 
     def __init__(self, settings: Any = None) -> None:
         if not (HAS_LANCEDB and HAS_PYARROW):
@@ -374,6 +390,28 @@ class LanceDBBackend(VectorStorageBackend):
     # Core operations
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _build_where(pushable: MetadataDict) -> str:
+        """The ``where`` expression: not expired, and narrowed by *pushable*.
+
+        The TTL test is parenthesised. It is an ``OR``, and appending
+        ``AND <metadata>`` to a bare ``a OR b`` would bind as
+        ``a OR (b AND metadata)`` — entries with no expiry would slip past the
+        metadata condition entirely.
+        """
+        clause = f"(expires_at = '' OR expires_at > '{_now_iso()}')"
+        for key, value in pushable.items():
+            # metadata_json holds canonical JSON: sorted keys, no spaces. So a
+            # matching row contains this exact pair as a substring, and the
+            # encoder here has to be the one that wrote it — hence
+            # ensure_ascii=False, matching canonical_json.
+            pair = (
+                f"{json.dumps(key, ensure_ascii=False)}:"
+                f"{json.dumps(value, ensure_ascii=False)}"
+            )
+            clause += f" AND metadata_json LIKE '%{quote_sql_literal(pair)}%'"
+        return clause
+
     async def search(
         self,
         collection_name: str,
@@ -381,16 +419,49 @@ class LanceDBBackend(VectorStorageBackend):
         limit: int = 5,
         score_threshold: float = 0.0,
     ) -> list[CacheResult]:
+        return await self.search_filtered(
+            collection_name, vector, limit, score_threshold, filters=None
+        )
+
+    async def search_filtered(
+        self,
+        collection_name: str,
+        vector: list[float],
+        limit: int = 5,
+        score_threshold: float = 0.0,
+        filters: MetadataDict | None = None,
+        overfetch: int = 10,
+    ) -> list[CacheResult]:
+        """Search, narrowing the scan by a substring test on the metadata JSON.
+
+        LanceDB has no JSON accessor to filter on, so the pushdown is a
+        ``LIKE`` over the encoded blob. That makes it a *narrowing* step rather
+        than a decision: it never hides a row that matches — a matching row
+        contains the pair verbatim — but a value carrying a ``%`` or a ``_``
+        matches more rows than it should, since those are LIKE wildcards.
+
+        So the fetch is widened whenever any filter is present, not only when
+        something is left over for Python: a false positive ranked above a true
+        match must not be able to fill up ``limit``. The Python pass then has
+        the last word, as everywhere else.
+
+        Only strings are pushed down. A number's JSON spelling is not unique
+        enough to match on — ``10`` and ``10.0`` are the same value to
+        ``metadata_matches`` and different substrings here.
+
+        Raises:
+            StorageError: If the search fails.
+        """
         table = self._get_table(collection_name)
-        now_iso = _now_iso()
-        where = f"expires_at = '' OR expires_at > '{now_iso}'"
+        pushable, _ = split_filters(filters)
+        fetch = filter_fetch_size(limit, filters or {}, overfetch)
         metric: str = self._settings.lancedb_metric
         try:
             rows: list[dict[str, Any]] = await (
                 table.vector_search(vector)
                 .distance_type(metric)
-                .where(where)
-                .limit(limit)
+                .where(self._build_where(pushable))
+                .limit(fetch)
                 .to_list()
             )
         except Exception as e:
@@ -402,7 +473,7 @@ class LanceDBBackend(VectorStorageBackend):
             score = max(0.0, min(1.0, score))
             if score >= score_threshold:
                 out.append(_row_to_result(row, score))
-        return out
+        return verify_filters(out, filters, limit)
 
     async def upsert(self, collection_name: str, entries: list[CacheEntry]) -> None:
         if not entries:

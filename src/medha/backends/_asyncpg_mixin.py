@@ -5,7 +5,23 @@ import uuid
 from typing import Any
 
 from medha.exceptions import StorageError
-from medha.types import CacheResult, PersistedStats
+from medha.types import CacheResult, MetadataDict, PersistedStats
+from medha.utils.metadata import (
+    canonical_json,
+    filter_fetch_size,
+    loads_metadata,
+    split_filters,
+    verify_filters,
+)
+
+# Columns every read path selects. Kept in one place so a column added to the
+# schema reaches search, scroll and the lookups together — a SELECT that
+# forgets one silently returns entries with that field at its default.
+_RESULT_COLUMNS = (
+    "id::text, original_question, normalized_question, generated_query, "
+    "query_hash, response_summary, template_id, usage_count, "
+    "feedback_correct, feedback_incorrect, created_at, metadata"
+)
 
 # Fixed literal, never derived from user input. The only identifier
 # interpolated into the stats SQL is the schema, which Settings validates
@@ -34,6 +50,8 @@ def _row_to_cache_result(row: Any, score: float | None = None) -> CacheResult:
         feedback_incorrect=row.get("feedback_incorrect") or 0,
         created_at=row.get("created_at"),
         expires_at=row.get("expires_at"),
+        # asyncpg hands back jsonb as a string unless a codec says otherwise.
+        metadata=loads_metadata(row.get("metadata")),
     )
 
 
@@ -47,6 +65,148 @@ class _AsyncpgBackendMixin:
     def _table_name(self, collection_name: str) -> str:
         safe = re.sub(r"[^a-zA-Z0-9_]", "_", collection_name)
         return f"{self._settings.pg_table_prefix}_{safe}"
+
+    def _vector_search_sql(
+        self,
+        collection_name: str,
+        vector: list[float],
+        score_threshold: float,
+        limit: int,
+        pushable: MetadataDict | None = None,
+    ) -> tuple[str, list[Any]]:
+        """The KNN query both PostgreSQL backends run, and its bind parameters.
+
+        Identical between pgvector and VectorChord: they differ in the index
+        that answers the ``ORDER BY``, not in the statement. Built in one place
+        so a column or predicate cannot reach one of them and not the other.
+
+        *pushable* adds a JSONB containment test. Containment is the right
+        operator here: it asks whether the row's metadata includes these pairs
+        and ignores the keys the row carries beyond them — exactly what
+        ``metadata_matches`` means. It also answers from a GIN index, which
+        :meth:`metadata_index_sql` hands to whoever wants one.
+        """
+        schema = self._settings.pg_schema
+        table = self._table_name(collection_name)
+        params: list[Any] = [vector, score_threshold]
+
+        metadata_clause = ""
+        if pushable:
+            params.append(canonical_json(pushable))
+            metadata_clause = f"AND metadata @> ${len(params)}::jsonb"
+
+        params.append(limit)
+        sql = f"""
+            SELECT
+                {_RESULT_COLUMNS},
+                expires_at,
+                (1 - (vector <=> $1::vector))::float AS score
+            FROM {schema}.{table}
+            WHERE (1 - (vector <=> $1::vector)) >= $2
+              AND (expires_at IS NULL OR expires_at > NOW())
+              {metadata_clause}
+            ORDER BY vector <=> $1::vector
+            LIMIT ${len(params)}
+        """
+        return sql, params
+
+    async def search_filtered(
+        self,
+        collection_name: str,
+        vector: list[float],
+        limit: int = 5,
+        score_threshold: float = 0.0,
+        filters: MetadataDict | None = None,
+        overfetch: int = 10,
+    ) -> list[CacheResult]:
+        """Search with the string-valued constraints pushed into the WHERE clause.
+
+        Shared by pgvector and VectorChord, which run the same statement.
+
+        Only the part of the filter :func:`split_filters` calls pushable goes
+        into SQL; whatever is left is applied in Python, and the fetch widens
+        to compensate. Note that neither of these backends is covered by the
+        test suite — their integration tests skip unless a PostgreSQL instance
+        is configured, and CI runs no service containers — so the pushdown is
+        deliberately restricted to the case that cannot be misread.
+
+        Raises:
+            StorageError: If the search fails.
+        """
+        if self._pool is None:
+            raise StorageError("Not connected. Call connect() first.")
+
+        pushable, residual = split_filters(filters)
+        sql, params = self._vector_search_sql(
+            collection_name,
+            vector,
+            score_threshold,
+            filter_fetch_size(limit, residual, overfetch),
+            pushable,
+        )
+        try:
+            async with self._pool.acquire() as conn:
+                rows = await conn.fetch(sql, *params)
+        except Exception as e:
+            raise StorageError(
+                f"asyncpg filtered search failed on '{collection_name}': {e}"
+            ) from e
+
+        return verify_filters([_row_to_cache_result(row) for row in rows], filters, limit)
+
+    def _metadata_ddl(self, table: str) -> str:
+        """DDL adding the metadata column to an existing table.
+
+        Executed on every ``initialize()``, not only at creation: a table
+        written by an earlier version is missing the column, and the first
+        upsert supplying it would fail the whole batch. ``IF NOT EXISTS`` makes
+        it idempotent.
+
+        JSONB rather than TEXT so the filter can go down as
+        ``metadata @> $n::jsonb``. From PostgreSQL 11 a column added with a
+        default is a catalog-only change, so this costs nothing however large
+        the table is.
+
+        No index is built here, deliberately — see
+        :meth:`metadata_index_sql`.
+        """
+        return f"""
+            ALTER TABLE {self._settings.pg_schema}.{table}
+                ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{{}}'::jsonb
+        """
+
+    def metadata_index_sql(self, collection_name: str) -> str:
+        """The GIN index statement for a collection, for an operator to run.
+
+        ``metadata @> ...`` works without it — the planner filters the rows the
+        vector index produced — and it only becomes worth having once a
+        collection holds enough entries that actually carry metadata.
+
+        It is not created at startup on purpose. A plain ``CREATE INDEX`` locks
+        the table against writes for the whole build, which an upgrade would
+        have imposed on every existing deployment to build an index over a
+        column that is ``{}`` in every row written before the upgrade —
+        a stall in exchange for nothing.
+
+        So it is handed over instead. ``CONCURRENTLY`` keeps writes running
+        while it builds; it cannot run inside a transaction block, and a failed
+        build leaves an invalid index behind that must be dropped before
+        retrying, which is exactly the kind of thing to do deliberately rather
+        than during someone else's deploy::
+
+            print(backend.metadata_index_sql("my_cache"))
+
+        Args:
+            collection_name: The collection whose table to index.
+
+        Returns:
+            A single SQL statement, ready to run.
+        """
+        table = self._table_name(collection_name)
+        return (
+            f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {table}_metadata_gin_idx "
+            f"ON {self._settings.pg_schema}.{table} USING gin (metadata);"
+        )
 
     def _stats_table_ddl(self) -> str:
         """DDL for the shared stats table, executed from ``initialize()``.
@@ -127,9 +287,7 @@ class _AsyncpgBackendMixin:
 
         vector_col = ", vector" if with_vectors else ""
         sql = f"""
-            SELECT id::text, original_question, normalized_question, generated_query,
-                   query_hash, response_summary, template_id, usage_count,
-                   feedback_correct, feedback_incorrect, created_at{vector_col}
+            SELECT {_RESULT_COLUMNS}{vector_col}
             FROM {schema}.{table}
             ORDER BY created_at ASC, id ASC
             LIMIT $1 OFFSET $2
@@ -187,9 +345,7 @@ class _AsyncpgBackendMixin:
         table = self._table_name(collection_name)
 
         sql = f"""
-            SELECT id::text, original_question, normalized_question, generated_query,
-                   query_hash, response_summary, template_id, usage_count,
-                   feedback_correct, feedback_incorrect, created_at
+            SELECT {_RESULT_COLUMNS}
             FROM {schema}.{table}
             WHERE query_hash = $1
             LIMIT 1
@@ -307,9 +463,7 @@ class _AsyncpgBackendMixin:
         schema = self._settings.pg_schema
         table = self._table_name(collection_name)
         sql = f"""
-            SELECT id::text, original_question, normalized_question, generated_query,
-                   query_hash, response_summary, template_id, usage_count,
-                   feedback_correct, feedback_incorrect, created_at, expires_at
+            SELECT {_RESULT_COLUMNS}, expires_at
             FROM {schema}.{table}
             WHERE normalized_question = $1
             LIMIT 1
