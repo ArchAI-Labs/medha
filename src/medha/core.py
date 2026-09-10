@@ -939,6 +939,7 @@ class Medha:
                 template_used=r.template_id,
                 expires_at=r.expires_at,
                 metadata=r.metadata,
+                entry_id=r.id,
             )
         return None
 
@@ -1032,6 +1033,7 @@ class Medha:
             template_used=best.template_id,
             expires_at=best.expires_at,
             metadata=best.metadata,
+            entry_id=best.id,
         )
 
     async def _search_fuzzy(
@@ -1130,6 +1132,7 @@ class Medha:
                 template_used=best_match.template_id,
                 expires_at=best_match.expires_at,
                 metadata=best_match.metadata,
+                entry_id=best_match.id,
             )
         return None
 
@@ -1226,6 +1229,7 @@ class Medha:
                     template_used=template_id,
                     expires_at=expires_at,
                     metadata=resolved_metadata,
+                    entry_id=entry.id,
                 ),
             )
 
@@ -1325,6 +1329,7 @@ class Medha:
 
             # Populate L1 cache — consistent with store()
             for item, meta in zip(entries, metadatas, strict=False):
+            for item, meta, entry in zip(entries, metadatas, cache_entries, strict=False):
                 await self._store_in_l1(
                     item["question"],
                     CacheHit(
@@ -1334,6 +1339,7 @@ class Medha:
                         strategy=SearchStrategy.EXACT_MATCH,
                         template_used=item.get("template_id"),
                         metadata=meta,
+                        entry_id=entry.id,
                     ),
                 )
 
@@ -1376,6 +1382,14 @@ class Medha:
         Entries are located by normalized-question match, deleted from the
         vector backend, and the corresponding L1 key is removed.
 
+    async def invalidate(
+        self, question: str, *, collection_name: str | None = None
+    ) -> bool:
+        """Invalidate every cache entry stored for *question*.
+
+        Entries are located by normalized-question match, deleted from the
+        vector backend, and the corresponding L1 key is removed.
+
         One question can map to several entries: nothing enforces uniqueness
         and ``store()`` mints a fresh id on every call, so storing the same
         question twice leaves two entries behind. Since
@@ -1386,10 +1400,13 @@ class Medha:
 
         Args:
             question: Natural language question whose cached entries to remove.
+            collection_name: Target collection. None = the instance's main
+                collection.
 
         Returns:
             True if at least one entry was found and deleted, False if none was.
         """
+        coll = collection_name or self._collection_name
         normalized = normalize_question(question)
         deleted_ids: set[str] = set()
         capped = True
@@ -1398,6 +1415,7 @@ class Medha:
             try:
                 result = await self._backend.search_by_normalized_question(
                     self._collection_name, normalized
+                    coll, normalized
                 )
             except Exception:
                 logger.exception("invalidate: backend lookup failed for '%s'", question[:50])
@@ -1414,6 +1432,7 @@ class Medha:
 
             try:
                 await self._backend.delete(self._collection_name, [result.id])
+                await self._backend.delete(coll, [result.id])
             except Exception:
                 logger.exception("invalidate: backend delete failed for id='%s'", result.id)
                 capped = False
@@ -1530,11 +1549,18 @@ class Medha:
         logger.info("Invalidated collection '%s' (%d entries dropped)", coll, count)
         return count
 
-    async def feedback(self, question: str, correct: bool) -> bool:
+    async def feedback(
+        self,
+        question: str,
+        correct: bool,
+        *,
+        entry_id: str | None = None,
+        collection_name: str | None = None,
+    ) -> bool:
         """Record feedback for a previously cached question.
 
-        Locates the entry by exact normalized-question match, increments
-        feedback_correct or feedback_incorrect, and — if
+        By default, locates the entry by exact normalized-question match,
+        increments feedback_correct or feedback_incorrect, and — if
         Settings.feedback_incorrect_threshold is set and the incorrect count
         has reached it — automatically invalidates the question.
 
@@ -1547,31 +1573,76 @@ class Medha:
         asked question was never stored, so there is nothing to find and the
         entry that actually answered is never penalised.
 
+        Passing entry_id (from ``CacheHit.entry_id``) sidesteps both problems:
+        feedback is applied directly to the entry that answered, regardless of
+        which question it was stored under, and auto-invalidation — if it
+        fires — removes only that one entry rather than every entry sharing a
+        normalized question.
+
         Args:
-            question: The original natural-language question.
+            question: The original natural-language question. Still used,
+                even with entry_id, to clear the L1 key this question was
+                looked up under — the L1 entry is keyed by the asked
+                question, not by entry_id.
             correct:  True → the cached query was correct; False → it was wrong.
+            entry_id: Id of the entry to address, from ``CacheHit.entry_id``.
+                When given, the normalized-question lookup is skipped
+                entirely and feedback is applied to this id directly.
+            collection_name: Target collection. None = the instance's main
+                collection. Needed when the hit being fed back on came from a
+                ``search_batch(collection_name=...)`` call against a
+                non-default collection — feedback has no way to infer the
+                collection from question or entry_id alone.
 
         Returns:
             True  if an entry was found and updated.
             False if no entry exists for the question (expired, invalidated, or
                   never stored).
+            False if no entry exists (expired, invalidated, never stored, or
+                  entry_id does not match any stored entry).
         """
+        coll = collection_name or self._collection_name
+
+        if entry_id is not None:
+            new_count = await self._backend.update_feedback(coll, entry_id, correct)
+            if new_count == 0:
+                logger.warning(
+                    "feedback: no entry found for entry_id='%s' in '%s'", entry_id, coll
+                )
+                return False
+            if (
+                not correct
+                and self._settings.feedback_incorrect_threshold is not None
+                and new_count >= self._settings.feedback_incorrect_threshold
+            ):
+                try:
+                    await self._backend.delete(coll, [entry_id])
+                except Exception:
+                    logger.exception(
+                        "feedback: auto-invalidation delete failed for entry_id='%s'",
+                        entry_id,
+                    )
+                else:
+                    await self._l1_backend.invalidate_prefix(question_hash(question))
+                    logger.info(
+                        "Auto-invalidated entry_id='%s' after %d incorrect feedbacks",
+                        entry_id,
+                        new_count,
+                    )
+            return True
+
         normalized = normalize_question(question)
-        result = await self._backend.search_by_normalized_question(
-            self._collection_name, normalized
-        )
+        result = await self._backend.search_by_normalized_question(coll, normalized)
         if result is None:
             logger.warning("feedback: no entry found for '%s'", question[:50])
             return False
-        new_count = await self._backend.update_feedback(
-            self._collection_name, result.id, correct
-        )
+        new_count = await self._backend.update_feedback(coll, result.id, correct)
         if (
             not correct
             and self._settings.feedback_incorrect_threshold is not None
             and new_count >= self._settings.feedback_incorrect_threshold
         ):
-            await self.invalidate(question)
+            await self.invalidate(question, collection_name=coll)
             logger.info(
                 "Auto-invalidated '%s' after %d incorrect feedbacks",
                 question[:50],
@@ -1812,6 +1883,7 @@ class Medha:
                         strategy=SearchStrategy.EXACT_MATCH,
                         template_used=item.get("template_id"),
                         metadata=entry.metadata,
+                        entry_id=entry.id,
                     ),
                 )
 
@@ -2317,6 +2389,17 @@ class Medha:
         """Synchronous wrapper for clear_caches()."""
         BaseEmbedder._run_sync(self.clear_caches())
 
-    def feedback_sync(self, question: str, correct: bool) -> bool:
+    def feedback_sync(
+        self,
+        question: str,
+        correct: bool,
+        *,
+        entry_id: str | None = None,
+        collection_name: str | None = None,
+    ) -> bool:
         """Synchronous wrapper for feedback()."""
-        return BaseEmbedder._run_sync(self.feedback(question, correct))
+        return BaseEmbedder._run_sync(
+            self.feedback(
+                question, correct, entry_id=entry_id, collection_name=collection_name
+            )
+        )

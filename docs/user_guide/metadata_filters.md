@@ -21,6 +21,9 @@ hit = await cache.search(
 
 Resolve the period in your application — that is where "yesterday" means something — then hand Medha the resolved value. If nothing is cached for that day, the search returns `NO_MATCH` and you generate the query as usual.
 
+!!! note "Tier 1 answers the same need from the other end"
+    A template can have a slot for a date too (`{day}` in `"sales for {day}"`), and nothing stops its `parameter_patterns` from capturing "yesterday" verbatim. Medha does not resolve it there either — the same clock/timezone/calendar reasoning applies — but the template tier refuses to render on an unresolved relative expression rather than substituting the word into the query. See [Parameter Extraction Pipeline](templates.md#parameter-extraction-pipeline).
+
 ---
 
 ## Matching Rules

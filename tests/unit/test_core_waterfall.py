@@ -361,6 +361,79 @@ class TestContextManager:
         # No error means success
 
 
+class TestEntryId:
+    """CacheHit.entry_id lets feedback() address the entry that answered,
+    independently of which question was asked (issue #43)."""
+
+    async def test_exact_hit_carries_entry_id(self, medha_instance):
+        await medha_instance.start()
+        await medha_instance.store("How many users?", "SELECT COUNT(*) FROM users")
+        stored_id = medha_instance._backend._collections["test_cache"][0].id
+        await medha_instance._l1_backend.clear()
+        medha_instance._embedding_cache.clear()
+
+        hit = await medha_instance.search("How many users?")
+
+        assert hit.strategy == SearchStrategy.EXACT_MATCH
+        assert hit.entry_id == stored_id
+
+    async def test_semantic_hit_carries_entry_id(self, medha_instance):
+        from medha.utils.normalization import normalize_question
+        await medha_instance.start()
+        await medha_instance.store("How many users?", "SELECT COUNT(*) FROM users")
+        stored_id = medha_instance._backend._collections["test_cache"][0].id
+        # Embeddings are computed from the normalized question — see
+        # Medha._get_embedding — so the query vector must be too, or the
+        # MockEmbedder's hash-based vector won't be close to the stored one.
+        embedding = await medha_instance._embedder.aembed(
+            normalize_question("How many users?")
+        )
+
+        hit = await medha_instance._search_semantic(embedding)
+
+        assert hit is not None
+        assert hit.entry_id == stored_id
+
+    async def test_fuzzy_hit_carries_entry_id(self, medha_instance):
+        pytest.importorskip("rapidfuzz")
+        from medha.utils.normalization import normalize_question
+        await medha_instance.start()
+        await medha_instance.store("How many users?", "SELECT COUNT(*) FROM users")
+        stored_id = medha_instance._backend._collections["test_cache"][0].id
+        embedding = await medha_instance._embedder.aembed(
+            normalize_question("How many users?")
+        )
+
+        hit = await medha_instance._search_fuzzy("How meny usrs?", embedding)
+
+        assert hit is not None
+        assert hit.entry_id == stored_id
+
+    async def test_template_hit_entry_id_is_none(self, medha_instance, sample_templates):
+        await medha_instance.start()
+        await medha_instance.load_templates(sample_templates)
+
+        hit = await medha_instance.search("How many users are there")
+
+        assert hit.strategy == SearchStrategy.TEMPLATE_MATCH
+        assert hit.entry_id is None
+
+    async def test_l1_hit_carries_same_entry_id_as_vector_tier(self, medha_instance):
+        await medha_instance.start()
+        await medha_instance.store("How many users?", "SELECT COUNT(*) FROM users")
+        await medha_instance._l1_backend.clear()
+        medha_instance._embedding_cache.clear()
+
+        vector_hit = await medha_instance.search("How many users?")
+        assert vector_hit.strategy == SearchStrategy.EXACT_MATCH
+
+        l1_hit = await medha_instance.search("How many users?")
+
+        assert l1_hit.strategy == SearchStrategy.L1_CACHE
+        assert l1_hit.entry_id == vector_hit.entry_id
+        assert l1_hit.entry_id is not None
+
+
 class TestFuzzyFallback:
     async def test_fuzzy_fallback(self, medha_instance):
         """Fuzzy matching requires rapidfuzz; if absent, gracefully skips."""

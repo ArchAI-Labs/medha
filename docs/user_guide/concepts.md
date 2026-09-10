@@ -94,7 +94,7 @@ sequenceDiagram
 
 | Type | Description |
 |---|---|
-| `CacheHit` | Returned on a successful search; contains `generated_query`, `strategy`, `confidence`, `response_summary` |
+| `CacheHit` | Returned on a successful search; contains `generated_query`, `strategy`, `confidence`, `response_summary`, `entry_id` |
 | `SearchStrategy` | Enum: `L1_CACHE`, `TEMPLATE_MATCH`, `EXACT_VECTOR_MATCH`, `SEMANTIC_MATCH`, `FUZZY_MATCH` |
 | `QueryTemplate` | A parameterised question pattern with named slots (e.g. `{city}`, `{date_range}`) |
 | `CacheEntry` | The stored record: question text, embedding, query, optional TTL |

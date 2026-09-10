@@ -32,6 +32,7 @@ def _full_hit() -> CacheHit:
         strategy=SearchStrategy.SEMANTIC_MATCH,
         template_used="count_entities",
         expires_at=EXPIRES_AT,
+        entry_id="11111111-1111-1111-1111-111111111111",
     )
 
 
@@ -47,6 +48,12 @@ def test_expires_at_survives_the_roundtrip():
     assert restored.expires_at == EXPIRES_AT, (
         f"expires_at dropped by the serialiser (got {restored.expires_at!r})"
     )
+
+
+def test_entry_id_survives_the_roundtrip():
+    """entry_id is what lets feedback() address the entry an L1 hit came from."""
+    restored = _deserialise(_serialise(_full_hit()))
+    assert restored.entry_id == "11111111-1111-1111-1111-111111111111"
 
 
 def test_no_field_is_omitted():

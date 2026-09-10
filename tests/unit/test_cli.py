@@ -339,6 +339,33 @@ class TestCliFeedback:
         result = runner.invoke(app, ["feedback", "my question", "--correct", "--incorrect"])
         assert result.exit_code != 0
 
+    def test_feedback_entry_id_forwarded_to_medha(self):
+        mock_medha = _make_mock_medha()
+        mock_medha.feedback = AsyncMock(return_value=True)
+
+        with _patch_build_medha(mock_medha):
+            result = runner.invoke(
+                app,
+                ["feedback", "my question", "--incorrect", "--entry-id", "abc-123"],
+            )
+
+        assert result.exit_code == 0
+        assert "Feedback recorded" in result.output
+        mock_medha.feedback.assert_awaited_once_with(
+            "my question", correct=False, entry_id="abc-123"
+        )
+
+    def test_feedback_without_entry_id_passes_none(self):
+        mock_medha = _make_mock_medha()
+        mock_medha.feedback = AsyncMock(return_value=True)
+
+        with _patch_build_medha(mock_medha):
+            runner.invoke(app, ["feedback", "my question", "--correct"])
+
+        mock_medha.feedback.assert_awaited_once_with(
+            "my question", correct=True, entry_id=None
+        )
+
     def test_feedback_works_with_noop_embedder(self, monkeypatch):
         monkeypatch.delenv("MEDHA_EMBEDDER_TYPE", raising=False)
         mock_medha = _make_mock_medha()

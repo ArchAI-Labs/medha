@@ -548,6 +548,16 @@ def feedback(
     incorrect: bool = typer.Option(
         False, "--incorrect/--no-incorrect", help="Mark the cached answer as incorrect."
     ),
+    entry_id: str | None = typer.Option(
+        None,
+        "--entry-id",
+        help=(
+            "Address a specific entry (CacheHit.entry_id) instead of "
+            "resolving QUESTION by normalized-question lookup. Use this to "
+            "mark the entry that actually answered a search, which matters "
+            "when it was stored under a different question."
+        ),
+    ),
 ) -> None:
     """Record correctness feedback for a cached entry.
 
@@ -568,7 +578,7 @@ def feedback(
     async def _run() -> None:
         try:
             async with _build_medha(coll, settings) as m:
-                found = await m.feedback(question, correct=correct)
+                found = await m.feedback(question, correct=correct, entry_id=entry_id)
         except (ConfigurationError, RuntimeError) as exc:
             typer.echo(f"Error: {exc}", err=True)
             raise typer.Exit(code=1) from exc

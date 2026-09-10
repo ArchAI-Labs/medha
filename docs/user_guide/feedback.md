@@ -50,6 +50,66 @@ Because the lookup is a plain text match, `feedback()` needs no working embedder
     calling `invalidate()` before `store()` rather than storing a second
     variant. Distinguishable entries are tracked in
     [issue #36](https://github.com/ArchAI-Labs/medha/issues/36).
+    By question, `feedback()` marks exactly one of them, and not necessarily
+    the one that answered: it resolves the question through its own lookup,
+    independently of the search that produced the hit. `invalidate()` is the
+    exception — it removes all of them. Pass `entry_id` (below) to mark the
+    entry that actually answered instead of an arbitrary tied match.
+
+---
+
+## Addressing the Entry That Answered (`entry_id`)
+
+Resolving feedback by question breaks down in a **misdirection** — a search
+answered by an entry stored under a *different* question (a semantic or
+fuzzy hit close enough to clear the threshold). The asked question was never
+stored, so the normalized-question lookup `feedback()` does by default finds
+nothing, and the entry that actually answered goes unpenalised.
+
+Every hit that came from a stored entry carries that entry's id:
+
+```python
+hit = await cache.search(question)
+
+if hit.entry_id is not None:
+    await cache.feedback(question, correct=False, entry_id=hit.entry_id)
+else:
+    await cache.feedback(question, correct=False)
+```
+
+| Field | Set for | `None` for |
+|---|---|---|
+| `CacheHit.entry_id` | Exact, semantic and fuzzy hits | Template hits (no stored entry behind them) |
+
+Passing `entry_id` skips the normalized-question lookup entirely and applies
+the counter directly to that entry — the only reliable target in a
+misdirection, and also the fix for the tie above: pass `hit.entry_id` instead
+of the question and the specific entry that answered gets marked, not
+whichever one the lookup happens to find.
+
+`question` is still required alongside `entry_id` — it is used to clear the
+L1 key the hit was served under if auto-invalidation fires (see below).
+
+Pass `collection_name` (with or without `entry_id`) when the hit came from a
+`search_batch(collection_name=...)` call against a collection other than the
+instance's default one — `feedback()` has no way to infer the collection
+from the question or the id alone, and defaults to the same collection
+`store()` writes to:
+
+```python
+await cache.feedback(question, correct=False, collection_name="tenant_42")
+```
+
+Auto-invalidation triggered through `entry_id` removes **only that entry**,
+never every entry sharing its normalized question — the narrower behaviour
+`feedback(question, correct)` cannot give you, since it has no way to name
+one entry among several.
+
+From the CLI:
+
+```bash
+medha feedback "How many orders were placed last month?" --incorrect --entry-id <id>
+```
 
 ---
 
@@ -64,8 +124,8 @@ Every cache entry carries two counters, both defaulting to `0`:
 
 They live on `CacheEntry` (the stored form) and on `CacheResult` (backend search results), and persist in the backend, so they survive restarts on every durable backend.
 
-!!! note "They are not on `CacheHit`"
-    The object returned by `search()` carries the query, confidence, strategy and expiry — not the feedback counters. To inspect them, export the collection:
+!!! note "The counters are not on `CacheHit`"
+    The object returned by `search()` carries the query, confidence, strategy, expiry and `entry_id` — not the feedback counters themselves. To inspect them, export the collection:
 
     ```python
     df = await cache.export_to_dataframe()
@@ -116,6 +176,8 @@ The default is `None` — counters accumulate but nothing is ever auto-removed. 
 | Entry found, `correct=False`, threshold reached | `True` | Entry invalidated from backend and L1 |
 | Entry not found | `False` | No change |
 | Entry already invalidated, called again | `False` | No change |
+| `entry_id` given, threshold reached | `True` | **Only that entry** invalidated (backend + L1 key for `question`) |
+| `entry_id` given, no matching entry | `False` | No change |
 
 ---
 
@@ -177,14 +239,20 @@ Set via environment as `MEDHA_FEEDBACK_BOOST_FACTOR` (a float in `[0.0, 1.0]`).
 ## Integration Pattern
 
 ```python
-async def handle_user_correction(question: str, was_correct: bool, cache: Medha) -> None:
-    updated = await cache.feedback(question, correct=was_correct)
+async def handle_user_correction(
+    question: str, hit: CacheHit, was_correct: bool, cache: Medha
+) -> None:
+    updated = await cache.feedback(question, correct=was_correct, entry_id=hit.entry_id)
     if not updated:
         # Entry expired or was never cached — nothing to update
         return
     if not was_correct:
         logger.warning("Incorrect cache hit reported for: %s", question[:80])
 ```
+
+Keeping `hit` around from the original `search()` call is what makes this
+robust to misdirection — `entry_id=None` (a template hit) falls back to the
+question-based lookup automatically.
 
 ---
 
@@ -193,6 +261,7 @@ async def handle_user_correction(question: str, was_correct: bool, cache: Medha)
 ```bash
 medha feedback "How many orders were placed last month?" --correct
 medha feedback "How many orders were placed last month?" --incorrect
+medha feedback "How many orders were placed last month?" --incorrect --entry-id <id>
 ```
 
 See the [CLI](cli.md) page for setup and the full command list.

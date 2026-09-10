@@ -134,6 +134,17 @@ class CacheHit(BaseModel):
             "itself rather than returning a stored entry."
         ),
     )
+    entry_id: str | None = Field(
+        default=None,
+        description=(
+            "Id of the stored entry that produced this hit, for exact, "
+            "semantic and fuzzy tiers. None for a template hit, which has no "
+            "stored entry behind it. Pass this to Medha.feedback() as "
+            "entry_id to address the entry that actually answered — the only "
+            "reliable target in a misdirection, where the asked question was "
+            "never stored under its own normalized form."
+        ),
+    )
 
 
 class QueryTemplate(BaseModel):
