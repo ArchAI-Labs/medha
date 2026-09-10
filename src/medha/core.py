@@ -1328,7 +1328,6 @@ class Medha:
             await self._backend.upsert(self._collection_name, cache_entries)
 
             # Populate L1 cache — consistent with store()
-            for item, meta in zip(entries, metadatas, strict=False):
             for item, meta, entry in zip(entries, metadatas, cache_entries, strict=False):
                 await self._store_in_l1(
                     item["question"],
@@ -1376,12 +1375,6 @@ class Medha:
 
     # --- Invalidation API ---
 
-    async def invalidate(self, question: str) -> bool:
-        """Invalidate every cache entry stored for *question*.
-
-        Entries are located by normalized-question match, deleted from the
-        vector backend, and the corresponding L1 key is removed.
-
     async def invalidate(
         self, question: str, *, collection_name: str | None = None
     ) -> bool:
@@ -1414,7 +1407,6 @@ class Medha:
         while len(deleted_ids) < _INVALIDATE_MAX_ENTRIES:
             try:
                 result = await self._backend.search_by_normalized_question(
-                    self._collection_name, normalized
                     coll, normalized
                 )
             except Exception:
@@ -1431,7 +1423,6 @@ class Medha:
                 break
 
             try:
-                await self._backend.delete(self._collection_name, [result.id])
                 await self._backend.delete(coll, [result.id])
             except Exception:
                 logger.exception("invalidate: backend delete failed for id='%s'", result.id)
