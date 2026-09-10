@@ -165,6 +165,62 @@ class TestPatternVerifiedRendering:
         assert result == "SELECT * FROM products LIMIT 10"
 
 
+class TestUnresolvedRelativeExpression:
+    """Issue #44: a value extracted verbatim (typically via a template's own
+    ``parameter_patterns``) must never render if it is still a relative time
+    marker like "yesterday" — that path bypasses `_sanitize_value()`
+    entirely, so without this check the tier would render a query built on
+    a word instead of a date."""
+
+    @pytest.fixture
+    def day_template(self):
+        return QueryTemplate(
+            intent="sales_by_day",
+            template_text="Show sales for {day}",
+            query_template="SELECT SUM(amount) FROM sales WHERE day = '{day}'",
+            parameters=["day"],
+            parameter_patterns={
+                "day": r"\b(yesterday|today|tomorrow|last week|\d{4}-\d{2}-\d{2})\b"
+            },
+        )
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "yesterday",
+            "Yesterday",
+            "today",
+            "tomorrow",
+            "tonight",
+            "last week",
+            "next week",
+            "this month",
+            "last month",
+            "next year",
+            "this Monday",
+            "last Friday",
+            "next Sunday",
+            "3 days ago",
+            "in 2 weeks",
+        ],
+    )
+    def test_relative_expression_refuses_to_render(
+        self, extractor, day_template, value
+    ):
+        with pytest.raises(ParameterExtractionError):
+            extractor.render_query(day_template, {"day": value})
+
+    def test_resolved_date_renders_exactly_as_before(self, extractor, day_template):
+        result = extractor.render_query(day_template, {"day": "2026-08-12"})
+        assert result == "SELECT SUM(amount) FROM sales WHERE day = '2026-08-12'"
+
+    def test_unrelated_capitalized_value_still_renders(self, extractor, dept_template):
+        """A value that merely shares no words with the relative-marker set
+        is unaffected — the check is whole-value, not substring."""
+        result = extractor.render_query(dept_template, {"department": "Engineering"})
+        assert "Engineering" in result
+
+
 class TestKeywordOverlapScore:
     def test_keyword_overlap_score(self):
         score = keyword_overlap_score("show top employees", "Show top {count} {entity}")

@@ -22,6 +22,28 @@ _HEURISTIC_EXCLUDED_WORDS = frozenset({
     "all", "top", "avg", "average", "total", "sum", "max", "min",
 })
 
+# Issue #44: a small set of relative time markers. Medha has no notion of
+# "now" — resolving one of these into an actual date is the caller's job,
+# the same split the metadata-filter guidance draws (see
+# docs/user_guide/metadata_filters.md). This pattern exists only to catch a
+# value that was *not* resolved, so it stays deliberately narrow: it flags
+# whole-value matches like "yesterday" or "last week", not every string that
+# merely contains one of these words.
+_RELATIVE_TIME_PATTERN = re.compile(
+    r"""
+    (?:
+        yesterday|today|tomorrow|tonight
+        |this\s+(?:morning|afternoon|evening|night|week|month|quarter|year|
+                  monday|tuesday|wednesday|thursday|friday|saturday|sunday)
+        |(?:last|next)\s+(?:week|month|quarter|year|
+                  monday|tuesday|wednesday|thursday|friday|saturday|sunday)
+        |\d+\s+(?:day|week|month|year)s?\s+ago
+        |in\s+\d+\s+(?:day|week|month|year)s?
+    )
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
 
 class ParameterExtractor:
     """Extract parameters from user questions using a cascading strategy."""
@@ -211,7 +233,17 @@ class ParameterExtractor:
     ) -> str:
         """Inject parameters into a query template.
 
-        Two paths, chosen per parameter:
+        Every value is first checked against a small set of unresolved
+        relative time markers ("yesterday", "last week", ...) — see
+        ``_RELATIVE_TIME_PATTERN``. Medha has no notion of "now", so a value
+        like that has no fixed meaning; substituting it verbatim renders a
+        query that is confidently wrong rather than one that fails to match.
+        This check runs *before* the pattern-verified path below, because a
+        template-declared ``parameter_patterns`` regex can capture "yesterday"
+        just as readily as an actual date, and that path is exactly the one
+        that skips the generic sanitizer.
+
+        Past that, two paths, chosen per parameter:
 
         - If ``template.parameter_patterns`` declares a pattern for this
           parameter and the value ``re.fullmatch``-es it, the value has
@@ -234,13 +266,30 @@ class ParameterExtractor:
             The rendered query string.
 
         Raises:
-            ParameterExtractionError: If a non-pattern-verified value would be
+            ParameterExtractionError: If a value is an unresolved relative
+                time expression, a non-pattern-verified value would be
                 altered by sanitization (or is empty after it), or a
                 placeholder remains unfilled.
         """
         query = template.query_template
 
         for param, value in parameters.items():
+            if self._is_unresolved_relative_expression(value):
+                logger.warning(
+                    "Parameter '%s' looks like an unresolved relative time "
+                    "expression (%r); refusing to render a query built on a "
+                    "word instead of a date",
+                    param, value,
+                )
+                raise ParameterExtractionError(
+                    f"Parameter {param!r} value {value!r} looks like an "
+                    f"unresolved relative time expression (e.g. 'yesterday', "
+                    f"'last week'). Medha does not resolve these — resolve it "
+                    f"in your application before searching/storing, e.g. by "
+                    f"passing the resolved value in place of the raw phrase, "
+                    f"or scoping the entry with filters={{'resolved_date': "
+                    f"...}} (see the metadata-filter guidance)."
+                )
             if self._is_pattern_verified(template, param, value):
                 safe_value = value
             else:
@@ -437,6 +486,20 @@ class ParameterExtractor:
                 "Invalid parameter_patterns regex for %r: %r", param, pattern
             )
             return False
+
+    @staticmethod
+    def _is_unresolved_relative_expression(value: str) -> bool:
+        """Whether ``value``, taken as a whole, is a relative time marker.
+
+        A ``re.fullmatch`` against the stripped value — deliberately whole-value
+        rather than a substring search, so a legitimate value that happens to
+        contain one of these words in passing (e.g. a template whose param
+        pattern captures a longer clause) is not falsely flagged. It exists to
+        catch exactly what issue #44 describes: a value extracted verbatim by
+        a template's own ``parameter_patterns`` regex, which is never resolved
+        against a clock anywhere in Medha.
+        """
+        return _RELATIVE_TIME_PATTERN.fullmatch(value.strip()) is not None
 
     @staticmethod
     def _sanitize_value(value: str) -> str:

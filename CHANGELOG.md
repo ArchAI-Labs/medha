@@ -157,6 +157,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the value, extraction now raises `ParameterExtractionError` instead of
   rendering the altered value.
 
+- **The template tier no longer renders unresolved relative dates (#44).**
+  Medha has no notion of "now", so nothing resolved a value like "yesterday"
+  before it reached `query_template` — a template with a date-scoped
+  `parameter_patterns` entry could capture the word itself and render
+  `WHERE day = 'yesterday'` as a confident Tier 1 hit. `render_query()` now
+  checks every value against a small set of relative time markers
+  (`yesterday`, `last week`, `next Monday`, `3 days ago`, ...) before
+  substitution and raises `ParameterExtractionError` on a match, turning it
+  into a cache miss instead of a wrong query. A resolved value
+  (`2026-08-12`) renders exactly as before. Resolving the expression is
+  still the caller's job — see the note in
+  [Parameter Extraction Pipeline](https://github.com/ArchAI-Labs/medha/blob/main/docs/user_guide/templates.md#parameter-extraction-pipeline),
+  next to the equivalent guidance for `filters=`.
+
 ### Upgrade notes
 
 - **Existing entries carry no metadata**, so they never satisfy a filter. This
