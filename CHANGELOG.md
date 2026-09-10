@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`CacheHit.entry_id`** and id-addressed feedback. `feedback()` used to
+  resolve the entry to update by exact normalized-question lookup of the
+  question that was *asked* — which finds nothing in a misdirection, where
+  the cache answers with an entry stored under a *different* question, since
+  that question was never stored. `CacheHit.entry_id` now carries the id of
+  the entry that actually answered (populated for exact, semantic and fuzzy
+  hits; `None` for a template hit, which has no stored entry behind it), and
+  `Medha.feedback(question, correct, *, entry_id=None)` accepts it:
+
+  ```python
+  hit = await cache.search(question)
+  await cache.feedback(question, correct=False, entry_id=hit.entry_id)
+  ```
+
+  When `entry_id` is given, the normalized-question lookup is skipped and the
+  counter is applied to that entry directly; auto-invalidation, if it fires,
+  removes only that entry rather than every entry sharing its normalized
+  question. `feedback(question, correct)` without `entry_id` is unchanged.
+  `entry_id` travels through the L1 cache like every other `CacheHit` field,
+  so an L1-served hit carries the same id as the vector-tier hit it was
+  cached from. The CLI's `medha feedback` command gained a matching
+  `--entry-id` option.
+
+- **`collection_name=` on `feedback()` and `invalidate()`.** Both used to
+  operate exclusively on the instance's default collection, with no way to
+  address the collection a `search_batch(collection_name=...)` hit actually
+  came from. Both now accept the same `collection_name` parameter
+  `search_batch()` does, defaulting to `None` (the instance's main
+  collection) so existing calls are unaffected.
+
 - **Metadata filters.** Entries can carry a structured scope, and a search can
   demand one. Questions that differ only by a date, a time window, a tenant, a
   currency or a region embed almost identically, so the semantic tier could

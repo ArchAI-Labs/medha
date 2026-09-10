@@ -1,5 +1,6 @@
 """Unit tests for the feedback loop (Spec 11 — v0.4.0)."""
 
+import asyncio
 import hashlib
 import uuid
 
@@ -8,6 +9,7 @@ from pydantic import ValidationError
 
 from medha.config import Settings
 from medha.types import CacheEntry, CacheResult, SearchStrategy
+from medha.utils.normalization import normalize_question, query_hash
 
 
 class TestFeedbackTypes:
@@ -310,6 +312,307 @@ class TestMedhaFeedbackAutoInvalidation:
             medha_threshold._collection_name, normalized
         )
         assert result is not None
+
+
+class TestFeedbackByEntryId:
+    """Id-addressed feedback (issue #43): the plumbing that lets a caller mark
+    the entry that actually answered, not the question that was asked."""
+
+    async def test_entry_id_feedback_increments_that_entry(self, medha_memory):
+        from medha.utils.normalization import normalize_question
+        question = "How many active subscriptions exist?"
+        await medha_memory.store(question, "SELECT COUNT(*) FROM subscriptions")
+        normalized = normalize_question(question)
+        stored = await medha_memory._backend.search_by_normalized_question(
+            medha_memory._collection_name, normalized
+        )
+
+        result = await medha_memory.feedback(
+            question, correct=False, entry_id=stored.id
+        )
+
+        assert result is True
+        updated = await medha_memory._backend.search_by_normalized_question(
+            medha_memory._collection_name, normalized
+        )
+        assert updated.feedback_incorrect == 1
+
+    async def test_entry_id_feedback_works_for_a_misdirected_hit(self, medha_memory):
+        """The whole point of entry_id: the asked question was never stored
+        under its own normalized form, so the question-based lookup that
+        feedback() falls back to would find nothing — but the id it was
+        actually served under still resolves."""
+        stored_question = "How many active subscriptions exist?"
+        asked_question = "something else entirely, never stored"
+        await medha_memory.store(stored_question, "SELECT COUNT(*) FROM subscriptions")
+        from medha.utils.normalization import normalize_question
+        stored = await medha_memory._backend.search_by_normalized_question(
+            medha_memory._collection_name, normalize_question(stored_question)
+        )
+
+        # The plain question-based path finds nothing for the asked question.
+        assert await medha_memory.feedback(asked_question, correct=False) is False
+
+        # entry_id addresses the entry that actually answered directly.
+        result = await medha_memory.feedback(
+            asked_question, correct=False, entry_id=stored.id
+        )
+        assert result is True
+
+        updated = await medha_memory._backend.search_by_normalized_question(
+            medha_memory._collection_name, normalize_question(stored_question)
+        )
+        assert updated.feedback_incorrect == 1
+
+    async def test_entry_id_not_found_returns_false(self, medha_memory):
+        result = await medha_memory.feedback(
+            "irrelevant", correct=True, entry_id="no-such-entry-id"
+        )
+        assert result is False
+
+    async def test_question_based_feedback_unchanged(self, medha_memory):
+        """feedback(question, correct) without entry_id behaves exactly as before."""
+        question = "How many active carts are there?"
+        await medha_memory.store(question, "SELECT COUNT(*) FROM carts")
+
+        assert await medha_memory.feedback(question, correct=True) is True
+        assert await medha_memory.feedback("never stored", correct=True) is False
+
+
+class TestFeedbackByEntryIdAutoInvalidation:
+    @pytest.fixture
+    async def medha_threshold(self, mock_embedder):
+        from medha.backends.memory import InMemoryBackend
+        from medha.core import Medha
+        settings = Settings(
+            backend_type="memory",
+            score_threshold_exact=0.99,
+            score_threshold_semantic=0.85,
+            feedback_incorrect_threshold=2,
+        )
+        m = Medha("fb_id_threshold", mock_embedder, InMemoryBackend(), settings)
+        await m.start()
+        yield m
+        await m.close()
+
+    async def test_auto_invalidation_removes_only_the_addressed_entry(self, medha_threshold):
+        """Two entries share a question; feedback addressed to one id must not
+        take the other down with it."""
+        question = "how many active orders"
+        await medha_threshold.store(question, "SELECT count(*) FROM orders WHERE active")
+        await medha_threshold.store(question, "SELECT count(*) FROM orders WHERE flag = 1")
+
+        results, _ = await medha_threshold._backend.scroll(
+            medha_threshold._collection_name, limit=100
+        )
+        assert len(results) == 2
+        target_id = results[0].id
+
+        await medha_threshold.feedback(question, correct=False, entry_id=target_id)
+        await medha_threshold.feedback(question, correct=False, entry_id=target_id)  # hits threshold=2
+
+        remaining, _ = await medha_threshold._backend.scroll(
+            medha_threshold._collection_name, limit=100
+        )
+        remaining_ids = {r.id for r in remaining}
+        assert target_id not in remaining_ids
+        assert remaining_ids == {results[1].id}
+
+    async def test_auto_invalidation_clears_l1_for_the_asked_question(self, medha_threshold):
+        from medha.types import SearchStrategy
+        question = "count pending refunds"
+        await medha_threshold.store(question, "SELECT COUNT(*) FROM refunds")
+        hit = await medha_threshold.search(question)  # populates L1
+        assert hit.entry_id is not None
+
+        await medha_threshold.feedback(question, correct=False, entry_id=hit.entry_id)
+        await medha_threshold.feedback(question, correct=False, entry_id=hit.entry_id)  # threshold=2
+
+        after = await medha_threshold.search(question)
+        assert after.strategy == SearchStrategy.NO_MATCH
+
+
+class TestFeedbackByEntryIdRaceCondition:
+    """A dedicated concurrency test for the entry_id auto-invalidation path.
+
+    Plain asyncio.gather() of two feedback() calls turns out *not* to
+    interleave here: InMemoryBackend.update_feedback()/.delete() take the
+    backend's asyncio.Lock, and acquiring an uncontended asyncio.Lock does not
+    yield control back to the event loop — so the first call runs start to
+    finish (increment, threshold check, delete) before the second one gets
+    scheduled at all. Confirmed empirically: 50/50 runs landed on the same
+    (True, False) ordering, never (True, True). Asserting against whichever
+    outcome that produces would test nothing about concurrency.
+
+    To exercise the actual race — both calls crossing the threshold and both
+    reaching the delete step for the same id — a real suspension point is
+    injected at backend.delete(), the moment that matters. That reliably
+    produces genuine interleaving: both calls observe a threshold-crossing
+    count and both attempt to delete the same entry, which is exactly the
+    scenario this test guards. What must hold regardless of backend timing:
+    neither call raises, and the entry ends up deleted exactly once — the
+    second physical delete on an id the first already removed is a no-op
+    (see InMemoryBackend.delete(), a plain dict.pop(id_, None))."""
+
+    async def test_concurrent_entry_id_feedback_does_not_raise(self, mock_embedder):
+        from medha.backends.memory import InMemoryBackend
+        from medha.core import Medha
+
+        settings = Settings(
+            backend_type="memory",
+            score_threshold_exact=0.99,
+            score_threshold_semantic=0.85,
+            feedback_incorrect_threshold=1,
+        )
+        m = Medha("fb_race", mock_embedder, InMemoryBackend(), settings)
+        await m.start()
+        question = "how many concurrent races"
+        await m.store(question, "SELECT COUNT(*) FROM races")
+        stored = await m._backend.search_by_normalized_question(
+            m._collection_name, normalize_question(question)
+        )
+        entry_id = stored.id
+
+        original_delete = m._backend.delete
+
+        async def delayed_delete(collection_name, ids):
+            # Force both feedback() calls to reach the physical delete before
+            # either completes it — the interleaving a race would produce,
+            # without depending on asyncio's actual (backend-specific)
+            # scheduling order to happen to land there on its own.
+            await asyncio.sleep(0)
+            return await original_delete(collection_name, ids)
+
+        m._backend.delete = delayed_delete
+
+        results = await asyncio.gather(
+            m.feedback(question, correct=False, entry_id=entry_id),
+            m.feedback(question, correct=False, entry_id=entry_id),
+            return_exceptions=True,
+        )
+
+        for r in results:
+            assert not isinstance(r, BaseException), f"feedback() raised: {r!r}"
+        assert results == [True, True], (
+            "expected both calls to cross the threshold and both reach "
+            f"delete() under forced interleaving, got {results!r}"
+        )
+
+        # The entry was deleted twice (once per call) without either delete
+        # raising, and it is gone exactly once.
+        remaining, _ = await m._backend.scroll(m._collection_name, limit=10)
+        assert remaining == []
+
+        await m.close()
+
+
+class TestFeedbackCollectionName:
+    """feedback() and invalidate() can target a collection other than the
+    instance's default one, matching search_batch(collection_name=...)."""
+
+    async def test_feedback_by_question_targets_specified_collection(self, medha_memory):
+        other_collection = "other_coll"
+        question = "how many orders in region B"
+        normalized = normalize_question(question)
+        embedding = await medha_memory._embedder.aembed(normalized)
+        entry = CacheEntry(
+            id=str(uuid.uuid4()),
+            vector=embedding,
+            original_question=question,
+            normalized_question=normalized,
+            generated_query="SELECT COUNT(*) FROM orders_region_b",
+            query_hash=query_hash("SELECT COUNT(*) FROM orders_region_b"),
+        )
+        await medha_memory._backend.initialize(
+            other_collection, medha_memory._embedder.dimension
+        )
+        await medha_memory._backend.upsert(other_collection, [entry])
+
+        # The default collection has nothing for this question.
+        assert await medha_memory.feedback(question, correct=True) is False
+
+        # Targeting the right collection finds and updates it.
+        result = await medha_memory.feedback(
+            question, correct=True, collection_name=other_collection
+        )
+        assert result is True
+
+        updated = await medha_memory._backend.search_by_normalized_question(
+            other_collection, normalized
+        )
+        assert updated.feedback_correct == 1
+
+    async def test_feedback_by_entry_id_targets_specified_collection(self, medha_memory):
+        other_collection = "other_coll_2"
+        question = "how many refunds in region C"
+        normalized = normalize_question(question)
+        embedding = await medha_memory._embedder.aembed(normalized)
+        entry = CacheEntry(
+            id=str(uuid.uuid4()),
+            vector=embedding,
+            original_question=question,
+            normalized_question=normalized,
+            generated_query="SELECT COUNT(*) FROM refunds_region_c",
+            query_hash=query_hash("SELECT COUNT(*) FROM refunds_region_c"),
+        )
+        await medha_memory._backend.initialize(
+            other_collection, medha_memory._embedder.dimension
+        )
+        await medha_memory._backend.upsert(other_collection, [entry])
+
+        result = await medha_memory.feedback(
+            question, correct=False, entry_id=entry.id, collection_name=other_collection
+        )
+        assert result is True
+
+        updated = await medha_memory._backend.search_by_normalized_question(
+            other_collection, normalized
+        )
+        assert updated.feedback_incorrect == 1
+
+    async def test_auto_invalidation_respects_collection_name(self, mock_embedder):
+        """Same question stored in two collections: auto-invalidation
+        triggered against one must not touch the other."""
+        from medha.backends.memory import InMemoryBackend
+        from medha.core import Medha
+
+        settings = Settings(
+            backend_type="memory",
+            score_threshold_exact=0.99,
+            score_threshold_semantic=0.85,
+            feedback_incorrect_threshold=1,
+        )
+        backend = InMemoryBackend()
+        m = Medha("main_coll", mock_embedder, backend, settings)
+        await m.start()
+        other_collection = "other_coll_3"
+        await backend.initialize(other_collection, mock_embedder.dimension)
+
+        question = "how many disputed charges"
+        await m.store(question, "SELECT COUNT(*) FROM disputes_main")
+
+        normalized = normalize_question(question)
+        embedding = await mock_embedder.aembed(normalized)
+        other_entry = CacheEntry(
+            id=str(uuid.uuid4()),
+            vector=embedding,
+            original_question=question,
+            normalized_question=normalized,
+            generated_query="SELECT COUNT(*) FROM disputes_other",
+            query_hash=query_hash("SELECT COUNT(*) FROM disputes_other"),
+        )
+        await backend.upsert(other_collection, [other_entry])
+
+        result = await m.feedback(question, correct=False, collection_name=other_collection)
+        assert result is True  # threshold=1: triggers invalidation in other_collection
+
+        assert await backend.search_by_normalized_question(other_collection, normalized) is None
+        main_result = await backend.search_by_normalized_question(
+            m._collection_name, normalized
+        )
+        assert main_result is not None
+
+        await m.close()
 
 
 class TestFeedbackSettings:

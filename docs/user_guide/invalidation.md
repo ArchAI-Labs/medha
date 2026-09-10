@@ -12,7 +12,7 @@ Invalidation permanently removes entries from the cache. Use it when the underly
 
 | Method | Scope | Returns |
 |---|---|---|
-| `invalidate(question)` | Every entry matched by normalized question | `bool` — whether anything was deleted |
+| `invalidate(question, *, collection_name=None)` | Every entry matched by normalized question | `bool` — whether anything was deleted |
 | `invalidate_by_query_hash(query_hash)` | Every entry producing the same query | `int` — entries deleted |
 | `invalidate_by_template(template_id)` | Every entry stored under a template | `int` — entries deleted |
 | `invalidate_collection(name=None)` | The whole collection | `int` — entries dropped |
@@ -31,6 +31,12 @@ async with Medha("demo", embedder=embedder, settings=settings) as cache:
 This performs an exact normalized-text match, not a semantic search. The question must match verbatim (modulo normalization) the question used at store time. Returns `False` if no entry matched.
 
 The matching L1 key is removed alongside the backend entries.
+
+Pass `collection_name` to target a collection other than the instance's default one — the same parameter `search_batch()` accepts for reads:
+
+```python
+await cache.invalidate("How many users?", collection_name="tenant_42")
+```
 
 !!! note "A question can map to more than one entry"
     `store()` mints a new id on every call, so storing the same question twice

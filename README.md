@@ -1624,7 +1624,7 @@ asyncio.run(main())
 | `Medha.export_to_dataframe(collection_name)` | Export collection to a pandas DataFrame |
 | `Medha.dedup_collection(collection_name)` | Remove duplicate entries (same `query_hash` **and** metadata) |
 | `Medha.expire(collection_name)` | Delete all expired entries; returns count |
-| `Medha.invalidate(question)` | Remove entry by exact question text; returns `bool` |
+| `Medha.invalidate(question, *, collection_name=None)` | Remove entry by exact question text; returns `bool` |
 | `Medha.invalidate_by_query_hash(hash)` | Remove all entries with a given query hash |
 | `Medha.invalidate_by_template(template_id)` | Remove all entries for a template intent |
 | `Medha.invalidate_collection(collection_name)` | Drop and recreate an entire collection |
@@ -1633,7 +1633,7 @@ asyncio.run(main())
 | `Medha.load_templates(templates)` | Load `QueryTemplate` list at runtime |
 | `Medha.load_templates_from_file(path)` | Load templates from JSON file |
 | `Medha.clear_caches()` | Clear L1 + embedding caches (async) |
-| `Medha.feedback(question, correct)` | Record correct/incorrect signal for a cached entry |
+| `Medha.feedback(question, correct, *, entry_id=None, collection_name=None)` | Record correct/incorrect signal for a cached entry; `entry_id` (from `CacheHit.entry_id`) addresses the entry that answered directly instead of resolving `question` by lookup; `collection_name` targets a non-default collection |
 | `Medha.feedback_sync` | Sync wrapper for `feedback()` |
 | `Medha.search_sync` / `store_sync` / `warm_from_file_sync` / `clear_caches_sync` | Sync wrappers |
 
@@ -1644,7 +1644,7 @@ asyncio.run(main())
 | `Settings` | Pydantic configuration with env var support (`MEDHA_` prefix) |
 | `Settings.feedback_incorrect_threshold` | Auto-invalidate a cache entry when its incorrect-feedback count reaches N |
 | `Settings.metadata_filter_mode` | `"strict"` (default) drops a filter mismatch; `"soft"` only lowers its confidence |
-| `CacheHit` | Search result: `generated_query`, `confidence`, `strategy`, `expires_at`, `metadata` |
+| `CacheHit` | Search result: `generated_query`, `confidence`, `strategy`, `expires_at`, `metadata`, `entry_id` |
 | `CacheStats` | Immutable stats snapshot: hit/miss rates, latency percentiles, per-strategy breakdown |
 | `StrategyStats` | Per-strategy `count`, `total_latency_ms`, `avg_latency_ms` |
 | `QueryTemplate` | Parameterized question-to-query template |
