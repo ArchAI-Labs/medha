@@ -12,6 +12,7 @@ Invalidation permanently removes entries from the cache. Use it when the underly
 
 | Method | Scope | Returns |
 |---|---|---|
+| `invalidate(question)` | Every entry matched by normalized question | `bool` — whether anything was deleted |
 | `invalidate(question, *, collection_name=None)` | Every entry matched by normalized question | `bool` — whether anything was deleted |
 | `invalidate_by_query_hash(query_hash)` | Every entry producing the same query | `int` — entries deleted |
 | `invalidate_by_template(template_id)` | Every entry stored under a template | `int` — entries deleted |

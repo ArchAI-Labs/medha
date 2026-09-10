@@ -1644,6 +1644,7 @@ asyncio.run(main())
 | `Settings` | Pydantic configuration with env var support (`MEDHA_` prefix) |
 | `Settings.feedback_incorrect_threshold` | Auto-invalidate a cache entry when its incorrect-feedback count reaches N |
 | `Settings.metadata_filter_mode` | `"strict"` (default) drops a filter mismatch; `"soft"` only lowers its confidence |
+| `CacheHit` | Search result: `generated_query`, `confidence`, `strategy`, `expires_at`, `metadata` |
 | `CacheHit` | Search result: `generated_query`, `confidence`, `strategy`, `expires_at`, `metadata`, `entry_id` |
 | `CacheStats` | Immutable stats snapshot: hit/miss rates, latency percentiles, per-strategy breakdown |
 | `StrategyStats` | Per-strategy `count`, `total_latency_ms`, `avg_latency_ms` |

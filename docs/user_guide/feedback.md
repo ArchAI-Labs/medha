@@ -41,6 +41,15 @@ Because the lookup is a plain text match, `feedback()` needs no working embedder
     question alone — so they tie at score 1.0, and which one answers a
     `search()` is decided by the order the backend happens to return ties in.
 
+    `feedback()` marks exactly one of them, and not necessarily the one that
+    answered: it resolves the question through its own lookup, independently
+    of the search that produced the hit. `invalidate()` is the exception — it
+    removes all of them.
+
+    Until entries can be told apart, keep one query per question: overwrite by
+    calling `invalidate()` before `store()` rather than storing a second
+    variant. Distinguishable entries are tracked in
+    [issue #36](https://github.com/ArchAI-Labs/medha/issues/36).
     By question, `feedback()` marks exactly one of them, and not necessarily
     the one that answered: it resolves the question through its own lookup,
     independently of the search that produced the hit. `invalidate()` is the
