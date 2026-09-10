@@ -88,6 +88,83 @@ class TestSanitizeValue:
         assert ParameterExtractor._sanitize_value("DROP;--") == "DROP--"
 
 
+class TestPatternVerifiedRendering:
+    """Issue #39: a pattern-verified value must render intact or raise —
+    it must never be silently corrupted by the generic sanitizer."""
+
+    @pytest.fixture
+    def time_range_template(self):
+        return QueryTemplate(
+            intent="meetings_in_range",
+            template_text="Show meetings between {time_range}",
+            query_template="SELECT * FROM meetings WHERE time_range = '{time_range}'",
+            parameters=["time_range"],
+            parameter_patterns={"time_range": r"\b(\d{2}:\d{2}-\d{2}:\d{2})\b"},
+        )
+
+    @pytest.fixture
+    def date_template(self):
+        return QueryTemplate(
+            intent="events_on_date",
+            template_text="Show events on {event_date}",
+            query_template="SELECT * FROM events WHERE event_date = '{event_date}'",
+            parameters=["event_date"],
+            parameter_patterns={"event_date": r"\b(\d{2}/\d{2}/\d{4})\b"},
+        )
+
+    def test_time_range_extracted_and_rendered_intact(
+        self, extractor, time_range_template
+    ):
+        """The reported case: 10:00-12:00 must survive extraction + render."""
+        params = extractor.extract(
+            "Show meetings between 10:00-12:00", time_range_template
+        )
+        assert params["time_range"] == "10:00-12:00"
+
+        result = extractor.render_query(time_range_template, params)
+        assert "10:00-12:00" in result
+        assert "1000-1200" not in result
+
+    def test_non_iso_date_extracted_and_rendered_intact(self, extractor, date_template):
+        params = extractor.extract("Show events on 10/08/2026", date_template)
+        assert params["event_date"] == "10/08/2026"
+
+        result = extractor.render_query(date_template, params)
+        assert "10/08/2026" in result
+
+    def test_render_query_raises_instead_of_corrupting_unverified_value(
+        self, extractor, dept_template
+    ):
+        """`department` has no parameter_patterns, so a value sanitization
+        would alter (the '&') must raise rather than silently render 'RD'."""
+        with pytest.raises(ParameterExtractionError):
+            extractor.render_query(dept_template, {"department": "R&D"})
+
+    def test_value_not_matching_declared_pattern_still_sanitized(
+        self, extractor, time_range_template
+    ):
+        """A value that doesn't fit the declared pattern gets no free pass:
+        it is sanitized like any NER/heuristic value, and corruption raises."""
+        with pytest.raises(ParameterExtractionError):
+            extractor.render_query(
+                time_range_template, {"time_range": "10:00-12:00; DROP"}
+            )
+
+    def test_heuristic_and_ner_values_still_sanitized_when_clean(
+        self, extractor, dept_template
+    ):
+        """Plain alphanumeric values from heuristics/NER keep working unchanged."""
+        result = extractor.render_query(dept_template, {"department": "Engineering"})
+        assert "Engineering" in result
+
+    def test_existing_regex_templates_render_exactly_as_before(
+        self, extractor, count_template
+    ):
+        params = {"count": "10", "entity": "products"}
+        result = extractor.render_query(count_template, params)
+        assert result == "SELECT * FROM products LIMIT 10"
+
+
 class TestKeywordOverlapScore:
     def test_keyword_overlap_score(self):
         score = keyword_overlap_score("show top employees", "Show top {count} {entity}")

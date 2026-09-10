@@ -115,6 +115,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   calling `initialize()` died inside a migration it was never meant to trigger.
   Invisible until the driver was installed in CI.
 
+- **Template parameters no longer get silently corrupted before rendering
+  (#39).** `render_query()` sanitized every extracted value with a fixed
+  allowlist (letters, digits, spaces, hyphens, underscores), which stripped
+  `:` and `/` — `10:00-12:00` rendered as `1000-1200`, `10/08/2026` as
+  `10082026` — and the template still matched, returning a confident hit
+  built on the mangled value. A value that `re.fullmatch`-es its
+  `parameter_patterns` entry is now injected as-is, since the template author
+  already constrained its shape; every other value (GLiNER, spaCy, the
+  heuristic fallback) is still sanitized, but if sanitization would change
+  the value, extraction now raises `ParameterExtractionError` instead of
+  rendering the altered value.
+
 ### Upgrade notes
 
 - **Existing entries carry no metadata**, so they never satisfy a filter. This
@@ -145,6 +157,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `search_filtered()` and `supports_metadata` both have defaults; a backend
   that does not opt in simply refuses filters instead of silently mishandling
   them.
+
+- **A template whose value would have been silently corrupted now fails
+  extraction instead.** If a NER- or heuristic-extracted value (never one
+  covered by `parameter_patterns`) contained a character outside letters,
+  digits, spaces, hyphens and underscores, it previously rendered with that
+  character stripped (e.g. `"O'Brien"` → `"OBrien"`). It now raises
+  `ParameterExtractionError`, which `Medha` already catches and treats as a
+  template-tier miss — the search falls through to the vector tiers instead
+  of returning a query built on a mangled value. Give such a parameter an
+  anchored entry in `parameter_patterns` to have it pass through intact.
 
 ## [0.5.0] — 2026-08-04
 

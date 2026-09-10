@@ -211,8 +211,20 @@ class ParameterExtractor:
     ) -> str:
         """Inject parameters into a query template.
 
-        Applies basic sanitization: only allows alphanumeric, spaces,
-        hyphens, and underscores in parameter values.
+        Two paths, chosen per parameter:
+
+        - If ``template.parameter_patterns`` declares a pattern for this
+          parameter and the value ``re.fullmatch``-es it, the value has
+          already been shape-checked by whoever wrote the template (a
+          fullmatch is anchored to the whole value, not just a substring of
+          the question) — it is injected as-is, without running it through
+          the generic sanitizer. This is what lets values like ``10:00-12:00``
+          or ``10/08/2026`` survive intact when a template opts into them.
+        - Otherwise (no declared pattern, or the value doesn't match one —
+          e.g. it came from NER or the heuristic fallback, which have no
+          declared shape) the value goes through ``_sanitize_value()``. If
+          sanitization would change the value, that value is never rendered:
+          we raise instead of silently substituting the corrupted result.
 
         Args:
             template: The QueryTemplate with placeholders.
@@ -222,13 +234,30 @@ class ParameterExtractor:
             The rendered query string.
 
         Raises:
-            ParameterExtractionError: If a parameter value fails sanitization
-                or a placeholder remains unfilled.
+            ParameterExtractionError: If a non-pattern-verified value would be
+                altered by sanitization (or is empty after it), or a
+                placeholder remains unfilled.
         """
         query = template.query_template
 
         for param, value in parameters.items():
-            safe_value = self._sanitize_value(value)
+            if self._is_pattern_verified(template, param, value):
+                safe_value = value
+            else:
+                safe_value = self._sanitize_value(value)
+                if safe_value != value:
+                    logger.warning(
+                        "Parameter '%s' altered by sanitization (raw=%r, sanitized=%r); "
+                        "refusing to render a corrupted query",
+                        param, value, safe_value,
+                    )
+                    raise ParameterExtractionError(
+                        f"Parameter {param!r} value {value!r} contains characters removed "
+                        f"by sanitization (would render as {safe_value!r}); refusing to "
+                        f"substitute a corrupted value. If {value!r} is a legitimate value, "
+                        f"declare an anchored pattern for {param!r} in the template's "
+                        f"parameter_patterns."
+                    )
             if not safe_value:
                 logger.warning(
                     "Parameter '%s' empty after sanitization (raw='%s')", param, value
@@ -382,6 +411,32 @@ class ParameterExtractor:
                 params[param] = capitalized.pop(0)
 
         return params
+
+    @staticmethod
+    def _is_pattern_verified(
+        template: QueryTemplate, param: str, value: str
+    ) -> bool:
+        """Whether ``value`` is exactly what the template's own pattern allows.
+
+        Only ``template.parameter_patterns`` declares an intentional shape —
+        NER and the heuristic fallback don't, so they never qualify here and
+        always go through ``_sanitize_value()``. ``re.fullmatch`` is what
+        "anchored" means in this context: it requires the pattern to account
+        for the *entire* value, not just find a substring within it, so a
+        pattern like ``\\b(\\d+)\\b`` still verifies correctly even without
+        literal ``^``/``$`` (those would break extraction, which runs the
+        same pattern against the whole question via ``re.findall``).
+        """
+        pattern = template.parameter_patterns.get(param)
+        if not pattern:
+            return False
+        try:
+            return re.fullmatch(pattern, value, re.IGNORECASE) is not None
+        except re.error:
+            logger.warning(
+                "Invalid parameter_patterns regex for %r: %r", param, pattern
+            )
+            return False
 
     @staticmethod
     def _sanitize_value(value: str) -> str:

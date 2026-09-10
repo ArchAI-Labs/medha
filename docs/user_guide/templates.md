@@ -156,7 +156,10 @@ flowchart LR
 3. **spaCy** — NER for a fixed set of slot names (`count`/`number`, `user`/`person`/`name`, `company`/`org`/`organization`, `project`). Slot names outside this set are not resolved by this stage. Skipped when no spaCy model is installed.
 4. **Heuristics** — bare numbers for numeric slots (`count`, `number`, `limit`, `top`), otherwise the first capitalized word. Multi-word values are truncated here, which is why `parameter_patterns` is recommended for anything richer than a single token.
 
-If any declared parameter is still missing after stage 4, the template is skipped. Extracted values are then sanitized — everything outside letters, digits, spaces, hyphens, and underscores is stripped — before being substituted into `query_template`.
+If any declared parameter is still missing after stage 4, the template is skipped. Extracted values are then validated before substitution into `query_template`:
+
+- A value that came from `parameter_patterns` and `re.fullmatch`-es the declared pattern for its slot is substituted as-is — the template author already constrained its shape (e.g. `\b(\d{2}:\d{2}-\d{2}:\d{2})\b` for a time range), so it is not run through the generic sanitizer. This is what lets values like `10:00-12:00` or `10/08/2026` survive intact.
+- Every other value (from GLiNER, spaCy, or the heuristic fallback — none of which declare a shape) is sanitized: everything outside letters, digits, spaces, hyphens, and underscores is stripped. If stripping would change the value, extraction raises `ParameterExtractionError` instead of substituting the altered value — a corrupted parameter is never silently rendered into a query.
 
 ---
 
