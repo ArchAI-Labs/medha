@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.6.0] — 2026-09-11
 
 ### Added
 
@@ -143,6 +143,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Template `aliases` had no effect on matching (#38).** Aliases were
+  embedded and persisted to an internal template collection at startup, but
+  that collection was never queried and Tier 1 scored keyword overlap against
+  `template_text` alone — so populating `aliases` changed nothing about what a
+  template matched. The keyword-overlap score is now the best of
+  `template_text` and every alias, letting an alias phrased closer to the
+  question win the match. This is a lexical `max()`, not a semantic one: an
+  alias broadens matching only for questions that share keywords with it, and
+  the template collection is still not queried.
+
 - **Chroma `search()` and `expire()` raised on every call (#41).** TTL was
   expressed as a `$gt` / `$lt` on `expires_at`, which is stored as an ISO-8601
   string — and Chroma accepts those operators only on numbers, so a current
@@ -201,6 +211,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   next to the equivalent guidance for `filters=`.
 
 ### Upgrade notes
+
+- **Templates that already carry `aliases` will match more questions.** The
+  aliases were inert before this release; they now contribute to the Tier 1
+  score. A template whose aliases are broader than its `template_text` can
+  start winning questions that previously fell through to the vector tiers.
 
 - **Existing entries carry no metadata**, so they never satisfy a filter. This
   is deliberate — they were not stored for any scope — but it means a filtered
