@@ -8,7 +8,7 @@ from medha.config import Settings
 from medha.core import Medha
 from medha.exceptions import TemplateError
 from medha.interfaces.storage import VectorStorageBackend
-from medha.types import CacheEntry, CacheResult, SearchStrategy
+from medha.types import CacheEntry, CacheResult, QueryTemplate, SearchStrategy
 from tests.conftest import MockEmbedder
 
 # ---------------------------------------------------------------------------
@@ -296,6 +296,42 @@ class TestWaterfallOrder:
         assert hit.strategy == SearchStrategy.NO_MATCH
         s = await medha_instance.stats()
         assert s.total_misses == 1
+
+
+class TestTemplateAliases:
+    """QueryTemplate.aliases must influence Tier 1 scoring (see keyword_overlap_score)."""
+
+    _TEMPLATE = QueryTemplate(
+        intent="count_entities_alias",
+        template_text="How many {entity} are there",
+        query_template="SELECT COUNT(*) FROM {entity}",
+        parameters=["entity"],
+        priority=1,
+        aliases=["Count all {entity}"],
+        parameter_patterns={"entity": r"\b(users|products|orders|employees)\b"},
+    )
+
+    async def test_alias_enables_a_match_template_text_alone_would_miss(
+        self, medha_instance
+    ):
+        await medha_instance.start()
+        await medha_instance.load_templates([self._TEMPLATE])
+
+        # Shares no keywords with template_text ("how many ... are there"),
+        # but matches the alias ("count all ...") word for word.
+        hit = await medha_instance.search("Count all users")
+
+        assert hit.strategy == SearchStrategy.TEMPLATE_MATCH
+        assert hit.generated_query == "SELECT COUNT(*) FROM users"
+
+    async def test_without_the_alias_the_same_question_misses(self, medha_instance):
+        await medha_instance.start()
+        template_no_alias = self._TEMPLATE.model_copy(update={"aliases": []})
+        await medha_instance.load_templates([template_no_alias])
+
+        hit = await medha_instance.search("Count all users")
+
+        assert hit.strategy != SearchStrategy.TEMPLATE_MATCH
 
 
 class TestStoreAndSearch:
