@@ -19,15 +19,22 @@ from medha.types import SearchStrategy
 
 @pytest.fixture
 async def chroma_backend():
+    from tests.conftest import drop_all_chroma_collections
+
     settings = Settings(chroma_mode="ephemeral")
     b = ChromaBackend(settings)
     await b.connect()
     yield b
+    # Every ephemeral client in the process shares one store, so a collection
+    # left behind here turns up in the next test.
+    await drop_all_chroma_collections(b)
     await b.close()
 
 
 @pytest.fixture
 async def medha_chroma(mock_embedder):
+    from tests.conftest import drop_all_chroma_collections
+
     settings = Settings(
         backend_type="chroma",
         chroma_mode="ephemeral",
@@ -45,6 +52,7 @@ async def medha_chroma(mock_embedder):
     )
     await m.start()
     yield m
+    await drop_all_chroma_collections(b)
     await m.close()
 
 
@@ -376,3 +384,104 @@ class TestCollectionIsolation:
         finally:
             await m1.close()
             await m2.close()
+
+
+class TestProcessIsolation:
+    """Two backends in one process.
+
+    This is the case the ephemeral mode makes easy to hit by accident, and it
+    has to keep working: chromadb hands every ephemeral client the same cached
+    store, and a second client built on top of it once failed outright.
+    """
+
+    async def test_two_backends_in_one_process_both_work(self):
+        from tests.conftest import drop_all_chroma_collections, make_entry
+
+        first = ChromaBackend(Settings(chroma_mode="ephemeral"))
+        second = ChromaBackend(Settings(chroma_mode="ephemeral"))
+        await first.connect()
+        await second.connect()
+        try:
+            await first.initialize("proc_iso_a", 8)
+            await second.initialize("proc_iso_b", 8)
+            await first.upsert("proc_iso_a", [make_entry() for _ in range(3)])
+            await second.upsert("proc_iso_b", [make_entry()])
+
+            assert await first.count("proc_iso_a") == 3
+            assert await second.count("proc_iso_b") == 1
+        finally:
+            await drop_all_chroma_collections(first)
+            await first.close()
+            await second.close()
+
+    async def test_one_store_is_shared_by_name(self):
+        """Two backends naming one collection see one set of entries.
+
+        The same thing two backends pointing at one Qdrant server would do.
+        Worth pinning down: it is the reason a test has to clean up after
+        itself, and the reason isolating instances was not the fix here.
+        """
+        from tests.conftest import drop_all_chroma_collections, make_entry
+
+        first = ChromaBackend(Settings(chroma_mode="ephemeral"))
+        second = ChromaBackend(Settings(chroma_mode="ephemeral"))
+        await first.connect()
+        await second.connect()
+        try:
+            await first.initialize("proc_shared", 8)
+            await first.upsert("proc_shared", [make_entry()])
+            await second.initialize("proc_shared", 8)
+
+            assert await second.count("proc_shared") == 1
+        finally:
+            await drop_all_chroma_collections(first)
+            await first.close()
+            await second.close()
+
+    async def test_closing_one_backend_leaves_the_other_usable(self):
+        from tests.conftest import drop_all_chroma_collections, make_entry
+
+        first = ChromaBackend(Settings(chroma_mode="ephemeral"))
+        second = ChromaBackend(Settings(chroma_mode="ephemeral"))
+        await first.connect()
+        await second.connect()
+        await second.initialize("survivor", 8)
+
+        await first.close()
+
+        await second.upsert("survivor", [make_entry()])
+        assert await second.count("survivor") == 1
+        await drop_all_chroma_collections(second)
+        await second.close()
+
+
+class TestLegacyDocuments:
+    """Entries written before the TTL fix must keep matching after it.
+
+    The stored shape is unchanged — `expires_at` is still an ISO-8601 string —
+    so the risk is the opposite one: a document written by an older version that
+    carries no `expires_at` key at all. A Chroma `where` would never match it;
+    filtering expiry in Python does.
+    """
+
+    async def test_document_without_expires_at_is_searchable(self, chroma_backend):
+        vec = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        await chroma_backend.initialize("legacy_col", 8)
+        raw = chroma_backend._collections["legacy_col"]
+        # Written straight through the driver: no expires_at, no metadata_json.
+        raw.upsert(
+            ids=["legacy-1"],
+            embeddings=[vec],
+            metadatas=[{
+                "original_question": "legacy question",
+                "normalized_question": "legacy question",
+                "generated_query": "SELECT legacy",
+                "query_hash": "deadbeef",
+            }],
+        )
+
+        results = await chroma_backend.search("legacy_col", vec, limit=5)
+
+        assert [r.id for r in results] == ["legacy-1"]
+        assert results[0].generated_query == "SELECT legacy"
+        assert await chroma_backend.find_expired("legacy_col") == []

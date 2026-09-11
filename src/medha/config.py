@@ -32,7 +32,7 @@ class Settings(BaseSettings):
             "'pgvector' requires asyncpg and pgvector (pip install medha-archai[pgvector]). "
             "'elasticsearch' requires elasticsearch[async]>=8.12 (pip install medha-archai[elasticsearch]). "
             "'vectorchord' requires asyncpg (pip install medha-archai[vectorchord]). "
-            "'chroma' requires chromadb>=0.5 (pip install medha-archai[chroma]). "
+            "'chroma' requires chromadb>=0.6 (pip install medha-archai[chroma]). "
             "'weaviate' requires weaviate-client>=4.6 (pip install medha-archai[weaviate]). "
             "'redis' requires redis[hiredis]>=4.6 (pip install medha-archai[redis]). "
             "'azure-search' requires azure-search-documents>=11.4 (pip install medha-archai[azure-search]). "

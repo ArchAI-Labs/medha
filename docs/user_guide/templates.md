@@ -16,9 +16,9 @@ Query templates let Medha match questions with variable slots — "Sales in {cit
 | `priority` | `int` | No | `1` (highest) to `5`. Contributes a small scoring bonus. Default `1` |
 | `aliases` | `list[str]` | No | Alternative phrasings. Default `[]` |
 
-!!! warning "`aliases` currently has no effect on matching"
+!!! note "How `aliases` affects matching"
 
-    Aliases are embedded and persisted to an internal template collection at startup, but that collection is never queried — Tier 1 scores against `template_text` only. Populating `aliases` will not broaden what a template matches today.
+    Tier 1's keyword-overlap score is computed against `template_text` and every entry in `aliases`, and the best of those is kept. This is a lexical `max()`, not a semantic one — an alias only broadens matching for questions that share keywords with it. Aliases are also embedded and persisted to an internal template collection at startup for a future embedding-based retrieval step, but that collection is not queried yet.
 
 ---
 

@@ -32,10 +32,29 @@ _CHROMA_UNSAFE_RE = re.compile(r"[^a-z0-9_-]")
 # Fixed id of the single stats document in the sidecar meta collection.
 _STATS_DOC_ID = "_stats"
 
+# Page size used to walk a collection when expiry has to be evaluated in
+# Python. Large enough that a typical cache is one or two round trips.
+_EXPIRY_PAGE_SIZE = 500
+
 
 def _chroma_collection_name(name: str) -> str:
+    """Map *name* onto a name Chroma will accept.
+
+    Chroma validates more than the character set: the first and last character
+    must be alphanumeric, and the name must be at least three characters long.
+    That is not a hypothetical constraint here — medha's own internal
+    collections start with ``__``, and Chroma rejects them outright.
+
+    A name that already satisfies the rules passes through untouched, which is
+    what keeps collections written before this correction reachable.
+    """
     safe = _CHROMA_UNSAFE_RE.sub("_", name.lower())
-    return safe[:63]
+    if not safe[:1].isalnum():
+        safe = f"c{safe}"
+    safe = safe[:63].rstrip("_-")
+    if len(safe) < 3:
+        safe = f"{safe}col"
+    return safe
 
 
 def _chroma_meta_collection_name(name: str) -> str:
@@ -48,8 +67,16 @@ def _chroma_meta_collection_name(name: str) -> str:
     return f"{_chroma_collection_name(name)[:57]}__meta"
 
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+def _as_utc(value: datetime | None) -> datetime | None:
+    """Read a stored timestamp as an aware one.
+
+    An entry written with a naive ``expires_at`` round-trips as naive, and
+    comparing that against an aware "now" raises ``TypeError``. Assuming UTC
+    matches how medha writes timestamps in the first place.
+    """
+    if value is not None and value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
 
 
 # Prefix under which each metadata key is mirrored as its own Chroma metadata
@@ -85,11 +112,11 @@ def _meta_to_result(id_: str, score: float, meta: dict[str, Any]) -> CacheResult
     expires_at = None
     if meta.get("expires_at"):
         with contextlib.suppress(ValueError, TypeError):
-            expires_at = datetime.fromisoformat(meta["expires_at"])
+            expires_at = _as_utc(datetime.fromisoformat(meta["expires_at"]))
     created_at = None
     if meta.get("created_at"):
         with contextlib.suppress(ValueError, TypeError):
-            created_at = datetime.fromisoformat(meta["created_at"])
+            created_at = _as_utc(datetime.fromisoformat(meta["created_at"]))
     return CacheResult(
         id=id_,
         score=max(0.0, min(1.0, score)),
@@ -120,7 +147,7 @@ class ChromaBackend(VectorStorageBackend):
     def __init__(self, settings: Any = None) -> None:
         if not HAS_CHROMA:
             raise ConfigurationError(
-                "chroma backend requires 'chromadb>=0.5'. "
+                "chroma backend requires 'chromadb>=0.6'. "
                 "Install with: pip install medha-archai[chroma]"
             )
         from medha.config import Settings
@@ -157,6 +184,14 @@ class ChromaBackend(VectorStorageBackend):
                 self._client = await asyncio.to_thread(chromadb.PersistentClient, path=path)
             else:
                 self._is_async = False
+                # chromadb serves every ephemeral client in a process from one
+                # cached in-process store, so two backends here share their
+                # collections. That is deliberate and matches every other
+                # backend: two clients naming one collection see one set of
+                # entries. Isolating them would mean a private Chroma database
+                # per instance, built through the admin client — and an admin
+                # client that reaches the shared system first leaves it without
+                # its tables, breaking every client built afterwards.
                 self._client = await asyncio.to_thread(chromadb.EphemeralClient)
         except Exception as e:
             raise StorageInitializationError(f"Failed to connect to Chroma ({mode}): {e}") from e
@@ -188,18 +223,32 @@ class ChromaBackend(VectorStorageBackend):
         return col
 
     @staticmethod
-    def _build_where(pushable: MetadataDict) -> dict[str, Any]:
-        """The ``where`` clause: never expired, and matching *pushable*."""
-        ttl: dict[str, Any] = {
-            "$or": [{"expires_at": {"$eq": ""}}, {"expires_at": {"$gt": _now_iso()}}]
-        }
-        if not pushable:
-            return ttl
-        conditions: list[dict[str, Any]] = [ttl]
-        conditions += [
+    def _build_where(pushable: MetadataDict) -> dict[str, Any] | None:
+        """The ``where`` clause matching *pushable*, or ``None`` for no clause.
+
+        Expiry is deliberately absent. ``expires_at`` is stored as an ISO-8601
+        string and Chroma accepts ``$gt`` / ``$lt`` only on numbers, so a TTL
+        predicate here is not merely ignored — it is rejected, and it made
+        every search raise. Storing a numeric expiry to range-compare instead
+        would not have helped the documents already written: a ``where`` never
+        matches a document that lacks the key. Expiry is therefore evaluated in
+        Python, where old and new documents read identically.
+
+        Chroma also rejects an empty clause, and an ``$and`` holding a single
+        operand — hence three shapes rather than one.
+        """
+        conditions: list[dict[str, Any]] = [
             {f"{_MD_PREFIX}{key}": {"$eq": value}} for key, value in pushable.items()
         ]
+        if not conditions:
+            return None
+        if len(conditions) == 1:
+            return conditions[0]
         return {"$and": conditions}
+
+    @staticmethod
+    def _is_expired(result: CacheResult, now: datetime) -> bool:
+        return result.expires_at is not None and result.expires_at <= now
 
     async def search(
         self,
@@ -239,7 +288,9 @@ class ChromaBackend(VectorStorageBackend):
         if cnt == 0:
             return []
         pushable, residual = split_filters(filters, pushable=(str, bool))
-        fetch = filter_fetch_size(limit, residual, overfetch)
+        # Expired rows come back from the engine and are dropped below, so they
+        # occupy result slots: over-fetch even when every filter was pushed down.
+        fetch = filter_fetch_size(limit, residual, overfetch, always=True)
         try:
             result = await self._run(
                 collection.query,
@@ -254,11 +305,15 @@ class ChromaBackend(VectorStorageBackend):
         ids = result["ids"][0]
         distances = result["distances"][0]
         metadatas = result["metadatas"][0]
+        now = datetime.now(timezone.utc)
         out = []
         for id_, dist, meta in zip(ids, distances, metadatas, strict=False):
             score = 1.0 - dist
-            if score >= score_threshold:
-                out.append(_meta_to_result(id_, score, meta))
+            if score < score_threshold:
+                continue
+            candidate = _meta_to_result(id_, score, meta)
+            if not self._is_expired(candidate, now):
+                out.append(candidate)
         return verify_filters(out, filters, limit)
 
     async def upsert(self, collection_name: str, entries: list[CacheEntry]) -> None:
@@ -345,7 +400,9 @@ class ChromaBackend(VectorStorageBackend):
                 return
             meta = dict(result["metadatas"][0])
             meta["usage_count"] = int(meta.get("usage_count", 0)) + 1
-            await self._run(collection.upsert, ids=[id_], metadatas=[meta])
+            # `upsert` insists on an embedding or a document; `update` is the
+            # write for touching metadata alone.
+            await self._run(collection.update, ids=[id_], metadatas=[meta])
         except Exception as e:
             raise StorageError(
                 f"Chroma update_usage_count failed on '{collection_name}': {e}"
@@ -370,17 +427,42 @@ class ChromaBackend(VectorStorageBackend):
             ) from e
 
     async def find_expired(self, collection_name: str) -> list[str]:
+        """Ids whose TTL has elapsed.
+
+        Chroma cannot range-compare the stored ISO-8601 string (see
+        :meth:`_build_where`), so the collection is paged through and the
+        comparison is made here. Unlike a search there is nothing to over-fetch:
+        every row is read exactly once.
+
+        Raises:
+            StorageError: If the scan fails.
+        """
         collection = self._get_collection(collection_name)
-        now_iso = _now_iso()
-        try:
-            result = await self._run(
-                collection.get,
-                where={"$and": [{"expires_at": {"$ne": ""}}, {"expires_at": {"$lt": now_iso}}]},
-                include=["metadatas"],
-            )
-        except Exception as e:
-            raise StorageError(f"Chroma find_expired failed on '{collection_name}': {e}") from e
-        return result.get("ids", [])
+        now = datetime.now(timezone.utc)
+        expired: list[str] = []
+        offset = 0
+        while True:
+            try:
+                result = await self._run(
+                    collection.get,
+                    limit=_EXPIRY_PAGE_SIZE,
+                    offset=offset,
+                    include=["metadatas"],
+                )
+            except Exception as e:
+                raise StorageError(
+                    f"Chroma find_expired failed on '{collection_name}': {e}"
+                ) from e
+            ids: list[str] = result.get("ids", [])
+            metadatas: list[dict[str, Any]] = result.get("metadatas", [])
+            expired += [
+                id_
+                for id_, meta in zip(ids, metadatas, strict=False)
+                if self._is_expired(_meta_to_result(id_, 1.0, meta), now)
+            ]
+            if len(ids) < _EXPIRY_PAGE_SIZE:
+                return expired
+            offset += len(ids)
 
     async def search_by_normalized_question(
         self, collection_name: str, normalized_question: str

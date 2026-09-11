@@ -190,6 +190,22 @@ settings = Settings(
 )
 ```
 
+!!! note "Ephemeral mode is shared across the process"
+
+    Chroma keeps one in-process store per Python process, so two ephemeral
+    backends built in the same program are two views of the same data: naming
+    one collection from both means one set of entries, exactly as two clients
+    pointed at one server would behave. Nothing is written to disk, and the
+    store disappears with the process — closing a backend does not empty it.
+
+!!! note "TTL is applied by medha, not by Chroma"
+
+    Chroma can only range-compare numbers, and `expires_at` is stored as an
+    ISO-8601 string, so expiry cannot be expressed in its `where` clause.
+    medha over-fetches and discards expired entries itself. The result is the
+    same; the cost is that expired rows still occupy slots in the raw result,
+    which matters only for a cache that is mostly stale.
+
 ---
 
 ## `weaviate` — Weaviate

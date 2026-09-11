@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.6.0] — 2026-09-11
 
 ### Added
 
@@ -112,6 +112,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The `chroma` extra now requires `chromadb>=0.6`** (was `>=0.5`). 0.6 is
+  where Chroma began validating filter operand types and collection names, and
+  the backend is written to those rules and verified against them; the older
+  releases accepted queries medha no longer sends and were never exercised in
+  CI. Nothing stored changes, so an existing collection is read by the newer
+  driver unchanged.
+
 - **`dedup_collection()` groups by query hash *and* metadata.** The same query
   stored under two scopes is two entries; collapsing them would leave the
   survivor answering for a scope it was never stored under. Entries without
@@ -135,6 +142,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   roughly a quarter of the suite never ran.
 
 ### Fixed
+
+- **Template `aliases` had no effect on matching (#38).** Aliases were
+  embedded and persisted to an internal template collection at startup, but
+  that collection was never queried and Tier 1 scored keyword overlap against
+  `template_text` alone — so populating `aliases` changed nothing about what a
+  template matched. The keyword-overlap score is now the best of
+  `template_text` and every alias, letting an alias phrased closer to the
+  question win the match. This is a lexical `max()`, not a semantic one: an
+  alias broadens matching only for questions that share keywords with it, and
+  the template collection is still not queried.
+
+- **Chroma `search()` and `expire()` raised on every call (#41).** TTL was
+  expressed as a `$gt` / `$lt` on `expires_at`, which is stored as an ISO-8601
+  string — and Chroma accepts those operators only on numbers, so a current
+  chromadb rejected the query outright. Every search failed, and so did the
+  background cleanup loop, whose errors were only logged. Expiry is now
+  evaluated in Python: the stored shape is unchanged, so entries written before
+  this release keep matching, including ones that carry no `expires_at` at all.
+  Searches over-fetch to compensate for the expired rows they discard.
+
+- **Chroma rejected medha's internal collection names.** Names were sanitised
+  for the character set only, while Chroma also requires alphanumeric first and
+  last characters and a length of at least three — so anything backed by a
+  `__`-prefixed collection, template storage included, failed to initialise.
+  A name that was already valid is unchanged and keeps pointing at its data.
+
+- **Chroma `update_usage_count()` wrote through `upsert()`**, which demands an
+  embedding or a document and refuses a metadata-only write. It now uses
+  `update()`, as the feedback counters already did.
+
+- **Chroma read a naive `expires_at` back as naive**, so comparing it against
+  an aware timestamp raised `TypeError`. Stored timestamps are now read as UTC.
 
 - **Qdrant `scroll()` dropped `expires_at`.** It rebuilt `CacheResult` inline
   instead of reusing `_point_to_cache_result`, and the copy had drifted. It now
@@ -172,6 +211,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   next to the equivalent guidance for `filters=`.
 
 ### Upgrade notes
+
+- **Templates that already carry `aliases` will match more questions.** The
+  aliases were inert before this release; they now contribute to the Tier 1
+  score. A template whose aliases are broader than its `template_text` can
+  start winning questions that previously fell through to the vector tiers.
 
 - **Existing entries carry no metadata**, so they never satisfy a filter. This
   is deliberate — they were not stored for any scope — but it means a filtered

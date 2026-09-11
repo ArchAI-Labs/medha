@@ -336,20 +336,34 @@ class TestElasticsearchPushdown:
 # ---------------------------------------------------------------------------
 
 class TestChromaPushdown:
-    def test_unfiltered_where_is_the_ttl_clause_alone(self):
+    def test_unfiltered_where_is_absent(self):
+        """Chroma rejects an empty clause, and expiry is filtered in Python."""
         from medha.backends.chroma import ChromaBackend
 
-        where = ChromaBackend._build_where({})
+        assert ChromaBackend._build_where({}) is None
 
-        assert set(where) == {"$or"}
-
-    def test_filters_are_anded_with_the_ttl_clause(self):
+    def test_single_filter_is_not_wrapped_in_and(self):
+        """Chroma requires at least two operands under `$and`."""
         from medha.backends.chroma import ChromaBackend
 
         where = ChromaBackend._build_where({"resolved_date": "2026-08-12"})
 
+        assert where == {"md.resolved_date": {"$eq": "2026-08-12"}}
+
+    def test_several_filters_are_anded(self):
+        from medha.backends.chroma import ChromaBackend
+
+        where = ChromaBackend._build_where({"resolved_date": "2026-08-12", "tenant": "acme"})
+
         assert {"md.resolved_date": {"$eq": "2026-08-12"}} in where["$and"]
+        assert {"md.tenant": {"$eq": "acme"}} in where["$and"]
         assert len(where["$and"]) == 2
+
+    def test_where_never_mentions_expiry(self):
+        """A TTL predicate on the ISO-8601 string is what made search raise."""
+        from medha.backends.chroma import ChromaBackend
+
+        assert "expires_at" not in str(ChromaBackend._build_where({"tenant": "acme"}))
 
     def test_metadata_keys_are_mirrored_for_filtering(self):
         from medha.backends.chroma import _entry_to_metadata

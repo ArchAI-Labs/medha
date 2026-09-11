@@ -800,8 +800,14 @@ class Medha:
                 )
                 continue
 
-            # Compute score from keyword overlap + param completeness
-            keyword_bonus = keyword_overlap_score(normalized, template.template_text)
+            # Compute score from keyword overlap + param completeness.
+            # Scored against template_text and every alias, keeping the best
+            # match — an alias phrased closer to the question should be able
+            # to win the match even when template_text itself scores lower.
+            keyword_bonus = max(
+                keyword_overlap_score(normalized, text)
+                for text in (template.template_text, *template.aliases)
+            )
             param_completeness = 1.0 if not template.parameters else (
                 len(params) / len(template.parameters)
             )
