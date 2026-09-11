@@ -1,7 +1,9 @@
 """Unit tests for ChromaBackend (mocked chromadb sync client — no real Chroma server required)."""
 
 import hashlib
+import re
 import uuid
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -370,9 +372,11 @@ async def test_update_usage_count_increments(chroma_backend):
 
     await b.update_usage_count(COLL, eid)
 
-    col.upsert.assert_called_once()
-    upserted_meta = col.upsert.call_args.kwargs["metadatas"][0]
-    assert upserted_meta["usage_count"] == 4
+    # Metadata-only writes go through `update`: `upsert` demands an embedding.
+    col.upsert.assert_not_called()
+    col.update.assert_called_once()
+    updated_meta = col.update.call_args.kwargs["metadatas"][0]
+    assert updated_meta["usage_count"] == 4
 
 
 async def test_update_usage_count_unknown_id(chroma_backend):
@@ -419,26 +423,106 @@ async def test_missing_deps_raises():
 
 
 # ---------------------------------------------------------------------------
+# collection naming
+# ---------------------------------------------------------------------------
+
+
+def _assert_chroma_accepts(name: str) -> None:
+    """Chroma's own rule, restated rather than imported.
+
+    The check lives in a private module that has moved between releases, so
+    asserting against it would test chromadb's layout instead of ours.
+    """
+    assert 3 <= len(name) <= 63, name
+    assert re.match(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*[a-zA-Z0-9]$", name), name
+    assert ".." not in name, name
+    assert not re.match(r"^[0-9]{1,3}(\.[0-9]{1,3}){3}$", name), name
+
+
+@pytest.mark.parametrize(
+    "given",
+    ["__medha_templates_demo", "_leading", "a", "", "__", "ends_with_underscore_", "x" * 80],
+)
+def test_collection_name_is_accepted_by_chroma(given):
+    """Chroma validates the ends and the length, not just the character set."""
+    from medha.backends.chroma import _chroma_collection_name, _chroma_meta_collection_name
+
+    _assert_chroma_accepts(_chroma_collection_name(given))
+    _assert_chroma_accepts(_chroma_meta_collection_name(given))
+
+
+def test_valid_collection_name_is_left_alone():
+    """Anything already valid must keep mapping where its data already is."""
+    from medha.backends.chroma import _chroma_collection_name
+
+    assert _chroma_collection_name("chroma_e2e") == "chroma_e2e"
+    assert _chroma_collection_name("My-Cache01") == "my-cache01"
+
+
+# ---------------------------------------------------------------------------
 # find_expired
 # ---------------------------------------------------------------------------
 
 
-async def test_find_expired_returns_ids(chroma_backend):
+def _ttl_meta(expires_at: str) -> dict:
+    return {
+        "original_question": "q",
+        "normalized_question": "q",
+        "generated_query": "SELECT 1",
+        "query_hash": "abc",
+        "created_at": "",
+        "expires_at": expires_at,
+    }
+
+
+async def test_find_expired_returns_only_elapsed_ids(chroma_backend):
+    """Chroma cannot range-compare the stored string, so medha selects here."""
     b, col = chroma_backend
     await b.initialize(COLL, DIM)
-    eid = str(uuid.uuid4())
-    col.get.return_value = {"ids": [eid]}
+    gone, alive = str(uuid.uuid4()), str(uuid.uuid4())
+    past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    col.get.return_value = {
+        "ids": [gone, alive],
+        "metadatas": [_ttl_meta(past), _ttl_meta(future)],
+    }
 
     expired_ids = await b.find_expired(COLL)
 
     col.get.assert_called()
-    assert expired_ids == [eid]
+    assert expired_ids == [gone]
+
+
+async def test_find_expired_ignores_entries_without_a_ttl(chroma_backend):
+    """An entry written with no expiry — including before this schema — stays."""
+    b, col = chroma_backend
+    await b.initialize(COLL, DIM)
+    no_ttl, legacy = str(uuid.uuid4()), str(uuid.uuid4())
+    legacy_meta = _ttl_meta("")
+    del legacy_meta["expires_at"]  # a document predating the field entirely
+    col.get.return_value = {
+        "ids": [no_ttl, legacy],
+        "metadatas": [_ttl_meta(""), legacy_meta],
+    }
+
+    assert await b.find_expired(COLL) == []
+
+
+async def test_find_expired_tolerates_naive_timestamps(chroma_backend):
+    """A naive stored timestamp must not raise when compared against UTC now."""
+    b, col = chroma_backend
+    await b.initialize(COLL, DIM)
+    eid = str(uuid.uuid4())
+    naive_past = (datetime.now(timezone.utc) - timedelta(hours=1)).replace(tzinfo=None)
+    col.get.return_value = {"ids": [eid], "metadatas": [_ttl_meta(naive_past.isoformat())]}
+
+    assert await b.find_expired(COLL) == [eid]
 
 
 async def test_find_expired_empty(chroma_backend):
     b, col = chroma_backend
     await b.initialize(COLL, DIM)
-    col.get.return_value = {"ids": []}
+    col.get.return_value = {"ids": [], "metadatas": []}
 
     expired_ids = await b.find_expired(COLL)
 

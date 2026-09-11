@@ -220,14 +220,21 @@ def split_filters(
     return down, rest
 
 
-def filter_fetch_size(limit: int, residual: MetadataDict, overfetch: int) -> int:
+def filter_fetch_size(
+    limit: int, residual: MetadataDict, overfetch: int, *, always: bool = False
+) -> int:
     """How many rows to retrieve so *limit* survive the Python-side filter.
 
     With nothing left to check in Python, the engine already returned matches
     only and ``limit`` is exactly right. Otherwise the fetch is widened, since
     an unknown share of the rows is about to be discarded.
+
+    ``always`` widens it even with an empty residual, for a backend that
+    discards rows in Python for a reason of its own. Chroma is one: it cannot
+    express the TTL predicate in its ``where`` at all, so expired rows come
+    back from the engine and take up result slots regardless of the filters.
     """
-    if not residual:
+    if not residual and not always:
         return limit
     return min(max(limit * overfetch, limit), MAX_FILTER_FETCH)
 

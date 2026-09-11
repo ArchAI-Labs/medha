@@ -169,6 +169,7 @@ async def any_backend(request, tmp_path):
         b = ChromaBackend(Settings(chroma_mode="ephemeral"))
         await b.connect()
         yield b
+        await drop_all_chroma_collections(b)
         await b.close()
     elif request.param == "lancedb":
         from medha.backends.lancedb import LanceDBBackend
@@ -178,6 +179,26 @@ async def any_backend(request, tmp_path):
         yield b
         await b.close()
 
+
+
+async def drop_all_chroma_collections(backend) -> None:
+    """Empty the process-wide Chroma store a backend was talking to.
+
+    chromadb serves every ephemeral client in a process from one cached store,
+    so a collection outlives the backend that created it and the next test
+    inherits its rows. The other backends tested here need no equivalent: the
+    in-memory one dies with its instance, and LanceDB gets a fresh ``tmp_path``.
+    Closing the backend is not enough — it only drops medha's own references.
+    """
+    import asyncio
+
+    client = backend._client
+    if client is None:
+        return
+    for entry in await asyncio.to_thread(client.list_collections):
+        # 0.6 returns names, earlier releases return collection objects.
+        name = entry if isinstance(entry, str) else entry.name
+        await asyncio.to_thread(client.delete_collection, name=name)
 
 @pytest.fixture
 async def pgvector_backend(test_settings_pgvector):

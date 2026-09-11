@@ -62,7 +62,10 @@ pgvector = [
 ]
 elasticsearch = ["elasticsearch[async]>=8.12,<9"]
 vectorchord = ["asyncpg>=0.29,<1"]
-chroma = ["chromadb>=0.5,<1"]
+# 0.6 is the floor medha is verified against: it is where Chroma began
+# validating filter operand types and collection names, and the backend is
+# written to those rules.
+chroma = ["chromadb>=0.6,<1"]
 weaviate = ["weaviate-client>=4.6,<5"]
 azure-search = ["azure-search-documents>=11.4,<12"]
 lancedb = ["lancedb>=0.6,<1", "pyarrow>=13"]
